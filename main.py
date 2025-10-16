@@ -15,6 +15,7 @@ from reportlab.platypus import (
     Image,
 )
 from reportlab.lib.styles import getSampleStyleSheet
+from datetime import datetime
 
 # ---------------- CONFIG ----------------
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
@@ -50,7 +51,14 @@ def safe_get(fields: Dict[str, Any], key: str) -> str:
         return ", ".join(str(x) for x in val if x)
     return str(val)
 
-def make_pdf(student_fields: Dict[str, Any], courses: List[Dict[str, Any]]):
+def split_courses(course_string: str) -> List[str]:
+    """Split rollup course list into clean separate lines."""
+    if not course_string:
+        return []
+    parts = [p.strip() for p in course_string.split(",") if p.strip()]
+    return parts
+
+def make_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     student_name = safe_get(student_fields, FIELDS["student_name"]).strip()
     school_year = safe_get(student_fields, FIELDS["school_year"])
     student_id = safe_get(student_fields, FIELDS["student_id"])
@@ -64,15 +72,16 @@ def make_pdf(student_fields: Dict[str, Any], courses: List[Dict[str, Any]]):
     styles = getSampleStyleSheet()
     story = []
 
-    # Header
+    # ---------- HEADER ----------
     if LOGO_PATH and pathlib.Path(LOGO_PATH).exists():
-        story.append(Image(LOGO_PATH, width=60 * mm, height=20 * mm))
+        story.append(Image(LOGO_PATH, width=70 * mm, height=25 * mm))
+    story.append(Spacer(1, 4 * mm))
     story.append(Paragraph(f"<b>{SCHOOL_NAME}</b>", styles["Title"]))
-    story.append(Paragraph("Official Transcript", styles["h2"]))
+    story.append(Paragraph("<b>Official Transcript</b>", styles["Heading2"]))
     story.append(Paragraph(f"For School Year {school_year}", styles["Normal"]))
-    story.append(Spacer(1, 8 * mm))
+    story.append(Spacer(1, 10 * mm))
 
-    # Student Info
+    # ---------- STUDENT INFO ----------
     info = [
         ["Student Name", student_name],
         ["Student Canvas ID", student_id],
@@ -81,48 +90,66 @@ def make_pdf(student_fields: Dict[str, Any], courses: List[Dict[str, Any]]):
     ]
     info_table = PdfTable(info, colWidths=[50 * mm, 90 * mm])
     info_table.setStyle(TableStyle([
-        ("BOX", (0, 0), (-1, -1), 0.5, colors.black),
-        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.black),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.grey),
         ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]))
     story.append(info_table)
-    story.append(Spacer(1, 10 * mm))
+    story.append(Spacer(1, 12 * mm))
 
-    # Course Table
+    # ---------- COURSES ----------
     table_data = [["Course Name", "Grade Letter", "% Total"]]
-    for row in courses:
-        table_data.append([
-            safe_get(row["fields"], FIELDS["course"]),
-            safe_get(row["fields"], FIELDS["letter"]),
-            safe_get(row["fields"], FIELDS["percent"]),
-        ])
+    for row in rows:
+        f = row["fields"]
+        raw_courses = safe_get(f, FIELDS["course"])
+        split_list = split_courses(raw_courses)
+        for course in split_list:
+            table_data.append([
+                course,
+                safe_get(f, FIELDS["letter"]),
+                safe_get(f, FIELDS["percent"]),
+            ])
+
+    if len(table_data) == 1:
+        table_data.append(["(no courses found)", "", ""])
 
     course_table = PdfTable(table_data, colWidths=[90 * mm, 40 * mm, 40 * mm])
     course_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
         ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.lightgrey]),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
     ]))
     story.append(course_table)
     story.append(Spacer(1, 10 * mm))
 
+    # ---------- FOOTER ----------
+    today = datetime.today().strftime("%B %d, %Y")
     story.append(Paragraph(
-        "This transcript is generated from the Cornerstone SIS and reflects the official record as of the run date.",
-        styles["Italic"]
-    ))
+        f"<i>This transcript is generated from the Cornerstone SIS and reflects the official record as of {today}.</i>",
+        styles["Italic"])
+    )
 
-    doc = SimpleDocTemplate(str(pdf_path), pagesize=A4,
-                            leftMargin=18 * mm, rightMargin=18 * mm,
-                            topMargin=18 * mm, bottomMargin=18 * mm)
+    doc = SimpleDocTemplate(
+        str(pdf_path),
+        pagesize=A4,
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+    )
     doc.build(story)
     print(f"[OK] Generated: {pdf_path}")
 
-
-# ---------------- MAIN ----------------
+# ---------- MAIN ----------
 def main():
     print(f"[INFO] Reading record {RECORD_ID} from {TRANSCRIPT_TABLE}")
     student_rec = table.get(RECORD_ID)
@@ -134,9 +161,7 @@ def main():
     formula = f"{{{FIELDS['student_name']}}} = '{student_name}'"
     rows = table.all(formula=formula)
     print(f"[INFO] Found {len(rows)} records for {student_name}")
-
     make_pdf(fields, rows)
-
 
 if __name__ == "__main__":
     main()
