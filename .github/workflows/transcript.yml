@@ -30,11 +30,18 @@ jobs:
           RECORD_ID: ${{ github.event.inputs.record_id }}
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
-          STUDENT_TABLE: ${{ secrets.STUDENT_TABLE }}
-          ENROLLMENTS_TABLE: ${{ secrets.ENROLLMENTS_TABLE }}
-          SCHOOL_NAME: ${{ secrets.SCHOOL_NAME }}
+          TRANSCRIPT_TABLE: ${{ secrets.TRANSCRIPT_TABLE }}   # e.g. "Students 1221"
+          SCHOOL_NAME: ${{ secrets.SCHOOL_NAME }}             # e.g. "Cornerstone Education Management Organization"
+          LOGO_PATH: logo_cornerstone.png                     # file in repo root (or set as a secret/var)
         run: |
           python main.py
+
+      - name: List output directory (debug)
+        run: |
+          echo "Root:"
+          ls -la || true
+          echo "Output:"
+          ls -la output || true
 
       - name: Upload transcript artifact
         uses: actions/upload-artifact@v4
