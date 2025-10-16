@@ -28,5 +28,17 @@ jobs:
       - name: Run script
         env:
           RECORD_ID: ${{ github.event.inputs.record_id }}
+          AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          STUDENT_TABLE: ${{ secrets.STUDENT_TABLE }}
+          ENROLLMENTS_TABLE: ${{ secrets.ENROLLMENTS_TABLE }}
+          SCHOOL_NAME: ${{ secrets.SCHOOL_NAME }}
         run: |
           python main.py
+
+      - name: Upload transcript artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcript
+          path: output/*.pdf
+          if-no-files-found: error
