@@ -23,7 +23,6 @@ AIRTABLE_BASE_ID = os.environ["AIRTABLE_BASE_ID"]
 TRANSCRIPT_TABLE = os.environ.get("TRANSCRIPT_TABLE", "Students 1221")
 SCHOOL_NAME = os.environ.get("SCHOOL_NAME", "Cornerstone Education Management Organization")
 
-# Prefer explicitly provided logo path; otherwise try common filenames
 LOGO_PATH = os.environ.get("LOGO_PATH") or (
     "logo.png" if pathlib.Path("logo.png").exists() else
     ("logo_cornerstone.png" if pathlib.Path("logo_cornerstone.png").exists() else None)
@@ -34,12 +33,12 @@ if not RECORD_ID:
     print("[ERROR] Missing RECORD_ID")
     sys.exit(1)
 
-# Field names in your table
-FIELD_STUDENT_NAME = "Students name"
+# ✅ fixed capitalization for this field name
+FIELD_STUDENT_NAME = "Students Name"
 FIELD_STUDENT_ID   = "Student Canvas ID"
 FIELD_SCHOOL_YEAR  = "School Year"
 FIELD_GRADE_LEVEL  = "Grade"
-FIELD_COURSE_NAME  = "Course Name Rollup"  # string or array depending on your rollup
+FIELD_COURSE_NAME  = "Course Name Rollup"
 FIELD_GRADE_LETTER = "Grade Letter"
 FIELD_PERCENT_TOTAL= "%Total"
 
@@ -51,13 +50,11 @@ def _get(fields: Dict[str, Any], key: str, default: str = "") -> str:
     v = fields.get(key)
     if v is None:
         return default
-    # convert list rollups to comma-separated for display
     if isinstance(v, list):
         return ", ".join(str(x) for x in v if x is not None)
     return str(v)
 
 def escape_formula_value(val: str) -> str:
-    # Use double quotes in Airtable formula to avoid issues with apostrophes
     return val.replace('"', '\\"')
 
 def fetch_primary_record(record_id: str) -> Dict[str, Any]:
@@ -69,8 +66,6 @@ def fetch_primary_record(record_id: str) -> Dict[str, Any]:
     return rec
 
 def fetch_all_rows_for_student(student_name: str) -> List[Dict[str, Any]]:
-    # Pull all records in the same table that belong to this student
-    # NOTE: We use double quotes in the filter formula
     formula = f'{{{FIELD_STUDENT_NAME}}} = "{escape_formula_value(student_name)}"'
     print(f"[DEBUG] filterByFormula: {formula}")
     rows = table.all(formula=formula)
@@ -86,7 +81,6 @@ def build_pdf(student_name: str, sample_fields: Dict[str, Any], rows: List[Dict[
     styles = getSampleStyleSheet()
     story = []
 
-    # Header
     if LOGO_PATH and pathlib.Path(LOGO_PATH).exists():
         try:
             story.append(Image(LOGO_PATH, width=60 * mm, height=20 * mm))
@@ -100,7 +94,6 @@ def build_pdf(student_name: str, sample_fields: Dict[str, Any], rows: List[Dict[
         story.append(Paragraph(f"For School Year {school_year}", styles["Normal"]))
     story.append(Spacer(1, 6 * mm))
 
-    # Student info box
     info_data = [
         ["Student Name", student_name],
         ["Student Canvas ID", _get(sample_fields, FIELD_STUDENT_ID)],
@@ -117,17 +110,13 @@ def build_pdf(student_name: str, sample_fields: Dict[str, Any], rows: List[Dict[
     story.append(info_table)
     story.append(Spacer(1, 8 * mm))
 
-    # Courses table
     table_data = [["Course Name", "Grade Letter", "% Total"]]
     if rows:
-        # Many bases store one course per row for a student.
-        # If your rollup returns an array/string, we still take row-level Grade Letter / %Total.
         for r in rows:
             f = r.get("fields", {})
             course_name = _get(f, FIELD_COURSE_NAME)
             grade_letter = _get(f, FIELD_GRADE_LETTER)
             pct_total = _get(f, FIELD_PERCENT_TOTAL)
-            # If course_name is empty (rare), still show something
             table_data.append([course_name or "(course)", grade_letter, pct_total])
     else:
         table_data.append(["(no courses found)", "", ""])
@@ -160,10 +149,7 @@ def build_pdf(student_name: str, sample_fields: Dict[str, Any], rows: List[Dict[
     print(f"[OK] Transcript written → {pdf_path}")
     return pdf_path
 
-
-# ---------------- Main ----------------
 def main():
-    # 1) Load the single record by ID (must belong to TRANSCRIPT_TABLE)
     rec = fetch_primary_record(RECORD_ID)
     fields = rec.get("fields", {})
     student_name = fields.get(FIELD_STUDENT_NAME)
@@ -171,14 +157,11 @@ def main():
         raise SystemExit(f"[ERROR] Field '{FIELD_STUDENT_NAME}' is empty on record {RECORD_ID}")
 
     print(f"[INFO] Student name: {student_name!r}")
-
-    # 2) Pull ALL rows for that student (same table)
     rows = fetch_all_rows_for_student(student_name)
     if not rows:
         print("[ERROR] No rows matched this student. Check field names / values.")
         sys.exit(2)
 
-    # 3) Generate PDF
     pdf_path = build_pdf(student_name, rows[0].get("fields", {}), rows, RECORD_ID)
     if not pdf_path or not pathlib.Path(pdf_path).exists():
         raise SystemExit("[ERROR] PDF not generated.")
