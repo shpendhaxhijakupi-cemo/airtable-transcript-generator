@@ -33,7 +33,7 @@ if not RECORD_ID:
     print("[ERROR] Missing RECORD_ID")
     sys.exit(1)
 
-# ✅ fixed capitalization for this field name
+# ✅ Correct field mappings
 FIELD_STUDENT_NAME = "Students Name"
 FIELD_STUDENT_ID   = "Student Canvas ID"
 FIELD_SCHOOL_YEAR  = "School Year"
@@ -47,15 +47,17 @@ table = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_TABLE)
 
 # ---------------- Helpers ----------------
 def _get(fields: Dict[str, Any], key: str, default: str = "") -> str:
+    """Safely get string or joined list from Airtable field."""
     v = fields.get(key)
     if v is None:
         return default
     if isinstance(v, list):
-        return ", ".join(str(x) for x in v if x is not None)
+        return ", ".join(str(x) for x in v if x)
     return str(v)
 
 def escape_formula_value(val: str) -> str:
-    return val.replace('"', '\\"')
+    """Escape quotes for Airtable formula filters."""
+    return str(val).replace('"', '\\"')
 
 def fetch_primary_record(record_id: str) -> Dict[str, Any]:
     print(f"[INFO] Using table: {TRANSCRIPT_TABLE}")
@@ -66,6 +68,7 @@ def fetch_primary_record(record_id: str) -> Dict[str, Any]:
     return rec
 
 def fetch_all_rows_for_student(student_name: str) -> List[Dict[str, Any]]:
+    """Fetch all rows with this student's name."""
     formula = f'{{{FIELD_STUDENT_NAME}}} = "{escape_formula_value(student_name)}"'
     print(f"[DEBUG] filterByFormula: {formula}")
     rows = table.all(formula=formula)
@@ -73,6 +76,7 @@ def fetch_all_rows_for_student(student_name: str) -> List[Dict[str, Any]]:
     return rows
 
 def build_pdf(student_name: str, sample_fields: Dict[str, Any], rows: List[Dict[str, Any]], record_id: str) -> pathlib.Path:
+    """Build the transcript PDF."""
     out_dir = pathlib.Path("output")
     out_dir.mkdir(parents=True, exist_ok=True)
     safe_name = student_name.replace(" ", "_").replace(",", "")
@@ -81,6 +85,7 @@ def build_pdf(student_name: str, sample_fields: Dict[str, Any], rows: List[Dict[
     styles = getSampleStyleSheet()
     story = []
 
+    # Header & Logo
     if LOGO_PATH and pathlib.Path(LOGO_PATH).exists():
         try:
             story.append(Image(LOGO_PATH, width=60 * mm, height=20 * mm))
@@ -94,6 +99,7 @@ def build_pdf(student_name: str, sample_fields: Dict[str, Any], rows: List[Dict[
         story.append(Paragraph(f"For School Year {school_year}", styles["Normal"]))
     story.append(Spacer(1, 6 * mm))
 
+    # Student info box
     info_data = [
         ["Student Name", student_name],
         ["Student Canvas ID", _get(sample_fields, FIELD_STUDENT_ID)],
@@ -110,6 +116,7 @@ def build_pdf(student_name: str, sample_fields: Dict[str, Any], rows: List[Dict[
     story.append(info_table)
     story.append(Spacer(1, 8 * mm))
 
+    # Courses table
     table_data = [["Course Name", "Grade Letter", "% Total"]]
     if rows:
         for r in rows:
@@ -149,10 +156,19 @@ def build_pdf(student_name: str, sample_fields: Dict[str, Any], rows: List[Dict[
     print(f"[OK] Transcript written → {pdf_path}")
     return pdf_path
 
+
+# ---------------- Main ----------------
 def main():
     rec = fetch_primary_record(RECORD_ID)
     fields = rec.get("fields", {})
-    student_name = fields.get(FIELD_STUDENT_NAME)
+
+    # ✅ Handle linked/rollup fields (lists)
+    student_name_field = fields.get(FIELD_STUDENT_NAME)
+    if isinstance(student_name_field, list):
+        student_name = str(student_name_field[0]) if student_name_field else ""
+    else:
+        student_name = str(student_name_field or "")
+
     if not student_name:
         raise SystemExit(f"[ERROR] Field '{FIELD_STUDENT_NAME}' is empty on record {RECORD_ID}")
 
