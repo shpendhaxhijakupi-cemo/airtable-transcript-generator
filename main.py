@@ -45,9 +45,10 @@ F = {
 }
 
 # ========= THEME =========
-GRAY_HEADER = colors.HexColor("#F0F0F0")
-BORDER_GRAY = colors.HexColor("#CCCCCC")
-DARK_GRAY = colors.HexColor("#333333")
+GRAY_HEADER = colors.HexColor("#F8F9FA")
+BORDER_GRAY = colors.HexColor("#DEE2E6")
+DARK_GRAY = colors.HexColor("#2C3E50")
+ACCENT_BLUE = colors.HexColor("#2C3E50")
 
 api = Api(AIRTABLE_API_KEY)
 table = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_TABLE)
@@ -104,25 +105,25 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     out = pathlib.Path("output"); out.mkdir(parents=True, exist_ok=True)
     pdf_path = out / f"transcript_{student_name.replace(' ', '_').replace(',', '')}_{year}.pdf"
 
-    # Page geometry
+    # Page geometry - smaller margins for more space
     doc = SimpleDocTemplate(
         str(pdf_path),
         pagesize=A4,
-        leftMargin=36, rightMargin=36,
-        topMargin=36, bottomMargin=42
+        leftMargin=40, rightMargin=40,
+        topMargin=40, bottomMargin=50
     )
     W = doc.width
 
     styles = getSampleStyleSheet()
     
-    # Custom styles
+    # Custom professional styles
     header_style = ParagraphStyle(
         'HeaderStyle',
         parent=styles['Normal'],
-        fontSize=14,
+        fontSize=16,
         textColor=DARK_GRAY,
         alignment=TA_CENTER,
-        spaceAfter=12,
+        spaceAfter=6,
         fontName='Helvetica-Bold'
     )
     
@@ -132,7 +133,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         fontSize=12,
         textColor=DARK_GRAY,
         alignment=TA_CENTER,
-        spaceAfter=20,
+        spaceAfter=24,
         fontName='Helvetica'
     )
     
@@ -141,7 +142,8 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         parent=styles['Normal'],
         fontSize=10,
         textColor=DARK_GRAY,
-        fontName='Helvetica'
+        fontName='Helvetica',
+        leading=12
     )
     
     bold_style = ParagraphStyle(
@@ -149,83 +151,76 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         parent=styles['Normal'],
         fontSize=10,
         textColor=DARK_GRAY,
-        fontName='Helvetica-Bold'
+        fontName='Helvetica-Bold',
+        leading=12
+    )
+    
+    small_style = ParagraphStyle(
+        'SmallStyle',
+        parent=styles['Normal'],
+        fontSize=9,
+        textColor=DARK_GRAY,
+        fontName='Helvetica',
+        leading=11
     )
 
     story: List[Any] = []
 
-    # ===== Header with two columns =====
+    # ===== Professional Header with two columns =====
     
-    # Left column - Student Info
-    student_info = [
-        [Paragraph("<b>Student Info</b>", bold_style), ""],
-        ["Name", student_name],
-        ["Current Grade Level", grade],
-        ["Student ID", student_id],
+    # Student Info Table
+    student_info_data = [
+        [Paragraph("<b>Student Info</b>", bold_style), Paragraph("<b>School Info</b>", bold_style)],
+        ["Name", student_name, SCHOOL_NAME],
+        ["Current Grade Level", grade, ADDR_LINE_1],
+        ["Student ID", student_id, ADDR_LINE_2],
+        ["", "", ADDR_LINE_3]
     ]
     
-    student_table = PdfTable(student_info, colWidths=[W/2 * 0.4, W/2 * 0.6])
+    student_table = PdfTable(student_info_data, colWidths=[W*0.25, W*0.35, W*0.40])
     student_table.setStyle(TableStyle([
-        ("SPAN", (0,0), (-1,0)),
-        ("BACKGROUND", (0,0), (-1,0), GRAY_HEADER),
-        ("ALIGN", (0,0), (-1,0), "CENTER"),
+        ("SPAN", (0,0), (1,0)),  # Span "Student Info" across first two columns
+        ("SPAN", (2,0), (2,0)),  # "School Info" stays in third column
+        ("BACKGROUND", (0,0), (2,0), GRAY_HEADER),
+        ("ALIGN", (0,0), (2,0), "CENTER"),
         ("ALIGN", (0,1), (0,-1), "LEFT"),
         ("ALIGN", (1,1), (1,-1), "LEFT"),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,-1), 10),
-        ("TOPPADDING", (0,0), (-1,-1), 6),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-        ("LEFTPADDING", (0,0), (-1,-1), 8),
-        ("RIGHTPADDING", (0,0), (-1,-1), 8),
-        ("GRID", (0,0), (-1,-1), 1, BORDER_GRAY),
+        ("ALIGN", (2,1), (2,-1), "LEFT"),
+        ("FONTNAME", (0,0), (2,0), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (2,-1), 10),
+        ("TOPPADDING", (0,0), (2,-1), 8),
+        ("BOTTOMPADDING", (0,0), (2,-1), 8),
+        ("LEFTPADDING", (0,0), (2,-1), 10),
+        ("RIGHTPADDING", (0,0), (2,-1), 10),
+        ("GRID", (0,0), (2,-1), 1, BORDER_GRAY),
+        ("VALIGN", (0,0), (2,-1), "MIDDLE"),
     ]))
     
-    # Right column - School Info
-    school_info = [
-        [Paragraph("<b>School Info</b>", bold_style)],
-        [SCHOOL_NAME],
-        [ADDR_LINE_1],
-        [ADDR_LINE_2],
-        [ADDR_LINE_3],
-    ]
-    
-    school_table = PdfTable(school_info, colWidths=[W/2])
-    school_table.setStyle(TableStyle([
-        ("SPAN", (0,0), (-1,0)),
-        ("BACKGROUND", (0,0), (-1,0), GRAY_HEADER),
-        ("ALIGN", (0,0), (-1,0), "CENTER"),
-        ("ALIGN", (0,1), (0,-1), "LEFT"),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,-1), 10),
-        ("TOPPADDING", (0,0), (-1,-1), 6),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-        ("LEFTPADDING", (0,0), (-1,-1), 8),
-        ("RIGHTPADDING", (0,0), (-1,-1), 8),
-        ("GRID", (0,0), (-1,-1), 1, BORDER_GRAY),
-    ]))
-    
-    # Combine both tables in a two-column layout
-    main_header = PdfTable([[student_table, school_table]], 
-                          colWidths=[W/2, W/2])
-    main_header.setStyle(TableStyle([
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-    ]))
-    
-    story.append(main_header)
-    story.append(Spacer(1, 20))
+    story.append(student_table)
+    story.append(Spacer(1, 25))
 
-    # ===== Report Card Title =====
+    # ===== School Branding =====
     if pathlib.Path(LOGO_PATH).exists():
-        logo = Image(LOGO_PATH, width=120, height=44)
+        logo = Image(LOGO_PATH, width=140, height=50)
         logo_table = PdfTable([[logo]], colWidths=[W])
         logo_table.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
         story.append(logo_table)
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 8))
     
-    story.append(Paragraph("Report Card", header_style))
-    story.append(Paragraph(f"For School Year {year}", subheader_style))
+    # School name as text if no logo
+    school_title = Paragraph(SCHOOL_NAME.upper(), header_style)
+    story.append(school_title)
+    story.append(Spacer(1, 4))
 
-    # ===== Courses table =====
+    # ===== Report Card Title =====
+    report_card_title = Paragraph("Report Card", header_style)
+    story.append(report_card_title)
+    
+    school_year = Paragraph(f"For School Year {year}", subheader_style)
+    story.append(school_year)
+    story.append(Spacer(1, 20))
+
+    # ===== Professional Courses Table =====
     table_data = [
         ["Course Name", "Course Number", "Teacher", "S1", "S2"]
     ]
@@ -255,37 +250,47 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     clean.sort(key=lambda x: (x[0].lower(), x[1].lower()))
     table_data.extend(clean if clean else [["(no courses found)","","","",""]])
 
-    cw = [0.50*W, 0.18*W, 0.20*W, 0.06*W, 0.06*W]
+    # Professional table sizing
+    cw = [0.45*W, 0.20*W, 0.23*W, 0.06*W, 0.06*W]
     courses = PdfTable(table_data, colWidths=cw, repeatRows=1)
     courses.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), GRAY_HEADER),
+        ("BACKGROUND", (0,0), (-1,0), ACCENT_BLUE),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
         ("FONTSIZE", (0,0), (-1,-1), 9),
         ("ALIGN", (0,0), (-1,0), "CENTER"),
         ("ALIGN", (3,1), (4,-1), "CENTER"),  # S1, S2 columns centered
+        ("ALIGN", (0,1), (2,-1), "LEFT"),    # Other columns left aligned
         ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
         ("GRID", (0,0), (-1,-1), 1, BORDER_GRAY),
-        ("TOPPADDING", (0,0), (-1,-1), 6),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-        ("LEFTPADDING", (0,0), (-1,-1), 6),
-        ("RIGHTPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 8),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 8),
+        ("LEFTPADDING", (0,0), (-1,-1), 8),
+        ("RIGHTPADDING", (0,0), (-1,-1), 8),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, GRAY_HEADER]),
     ]))
     story.append(courses)
-    story.append(Spacer(1, 30))
+    story.append(Spacer(1, 35))
 
-    # ===== Signature block =====
-    sig_data = []
+    # ===== Professional Signature Block =====
+    signature_content = []
     
+    # Signature image
     if pathlib.Path(SIGNATURE_PATH).exists():
-        signature = Image(SIGNATURE_PATH, width=160, height=55)
-        sig_data.append([signature])
+        signature = Image(SIGNATURE_PATH, width=140, height=50)
+        signature_content.append(signature)
+        signature_content.append(Spacer(1, 8))
     
-    sig_data.append([CenterLine(width=180)])
-    sig_data.append([Spacer(1, 4)])
-    sig_data.append([Paragraph(f"Principal - {PRINCIPAL}", normal_style)])
-    sig_data.append([Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", normal_style)])
+    # Signature line
+    signature_content.append(CenterLine(width=200, thickness=1))
+    signature_content.append(Spacer(1, 6))
     
-    signature_table = PdfTable(sig_data, colWidths=[W])
+    # Principal and date
+    signature_content.append(Paragraph(f"Principal - {PRINCIPAL}", bold_style))
+    signature_content.append(Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", normal_style))
+    
+    # Center the entire signature block
+    signature_table = PdfTable([[signature_content]], colWidths=[W])
     signature_table.setStyle(TableStyle([
         ("ALIGN", (0,0), (-1,-1), "CENTER"),
         ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
@@ -295,7 +300,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
     # Build with page border
     doc.build(story, onFirstPage=draw_page_border, onLaterPages=draw_page_border)
-    print(f"[OK] Generated → {pdf_path}")
+    print(f"[OK] Generated professional transcript → {pdf_path}")
     return pdf_path
 
 # ========= main =========
