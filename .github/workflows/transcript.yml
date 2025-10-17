@@ -27,21 +27,25 @@ jobs:
 
       - name: Run script
         env:
+          # Inputs / secrets
           RECORD_ID: ${{ github.event.inputs.record_id }}
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
           TRANSCRIPT_TABLE: ${{ secrets.TRANSCRIPT_TABLE }}   # e.g., "Students 1221"
           SCHOOL_NAME: ${{ secrets.SCHOOL_NAME }}             # e.g., "Cornerstone Education Management Organization"
-          # Header (optional, but recommended)
+
+          # Header (shown on the right side)
           SCHOOL_HEADER_RIGHT_LINE1: "Cornerstone Online"
           SCHOOL_HEADER_RIGHT_LINE2: "18550 Fajarado St."
           SCHOOL_HEADER_RIGHT_LINE3: "Rowland Heights, CA 91748"
-          # Branding
-          LOGO_PATH: logo.png                                  # <- matches your repo file
-          # Signature (optional)
+
+          # Branding assets in repo root
+          LOGO_PATH: logo_cornerstone.png
+          SIGNATURE_PATH: signature_principal.png
+
+          # Signature text/date
           PRINCIPAL_NAME: "Ursula Derios"
           SIGN_DATE_FMT: "%B %d, %Y"
-          # SIGNATURE_PATH: signature.png                       # add a file and uncomment to show signature
         run: |
           python main.py
 
