@@ -7,7 +7,6 @@ from typing import Dict, Any, List, Tuple
 from pyairtable import Api
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
-from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table as PdfTable, TableStyle, Image, Flowable
 )
@@ -80,7 +79,7 @@ def detect_semester(name: str, code: str) -> Tuple[bool, bool]:
     return (is_a and not is_b, is_b and not is_a)
 
 class CenterLine(Flowable):
-    def __init__(self, width=70*mm, thickness=0.7):
+    def __init__(self, width=200, thickness=0.7):
         super().__init__()
         self.width, self.thickness = width, thickness
         self.height = 3
@@ -98,44 +97,58 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     out = pathlib.Path("output"); out.mkdir(parents=True, exist_ok=True)
     pdf_path = out / f"transcript_{student_name.replace(' ', '_').replace(',', '')}_{year}.pdf"
 
+    # Build the doc FIRST so we can use doc.width everywhere
+    left_margin  = 45    # points (~16 mm)
+    right_margin = 45
+    top_margin   = 40
+    bottom_margin= 40
+    doc = SimpleDocTemplate(
+        str(pdf_path),
+        pagesize=A4,  # portrait
+        leftMargin=left_margin, rightMargin=right_margin,
+        topMargin=top_margin, bottomMargin=bottom_margin,
+    )
+    avail_w = doc.width  # usable width after margins
+
     styles = getSampleStyleSheet()
     normal = styles["Normal"]
-    h2 = styles["Heading2"]; h2.alignment = 1
-    h2.spaceBefore, h2.spaceAfter = 4, 6
+    h2 = styles["Heading2"]; h2.alignment = 1; h2.spaceBefore, h2.spaceAfter = 4, 8
 
-    # Colors & sizes to mimic the sample
     header_gray = colors.HexColor("#CCCCCC")
     row_alt1 = colors.whitesmoke
     row_alt2 = colors.HexColor("#EFEFEF")
 
     story: List[Any] = []
 
-    # === Header row (single row with 3 columns) ===
+    # === Header row (3 columns) ===
+    # Left block (school name + address)
     left_block = [
         Paragraph(f"<b>{SCHOOL_NAME}</b>", normal),
         Paragraph(ADDR_LINE_1, normal),
         Paragraph(ADDR_LINE_2, normal),
         Paragraph(ADDR_LINE_3, normal),
     ]
+
     center_block: List[Any] = []
     if pathlib.Path(LOGO_PATH).exists():
-        center_block.append(Image(LOGO_PATH, width=40*mm, height=15*mm))
-    right_block = []  # reserved for future, keeping symmetry
+        # reasonable logo size in portrait
+        center_block.append(Image(LOGO_PATH, width=120, height=45))  # points
+    right_block: List[Any] = []
 
     header_tbl = PdfTable([[left_block, center_block, right_block]],
-                          colWidths=[110*mm, 60*mm, 20*mm])
+                          colWidths=[0.5*avail_w, 0.35*avail_w, 0.15*avail_w])
     header_tbl.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP")]))
     story.append(header_tbl)
-    story.append(Spacer(1, 8*mm))
+    story.append(Spacer(1, 10))
 
-    # === Student Info box (left aligned, same row as logo/address in sample) ===
-    student_info = PdfTable([
+    # === Student Info box on the left ===
+    info = PdfTable([
         ["Student Info", ""],
         ["Name",               student_name],
         ["Current Grade Level", grade],
         ["Student ID",         student_id],
-    ], colWidths=[55*mm, 90*mm])
-    student_info.setStyle(TableStyle([
+    ], colWidths=[0.31*avail_w, 0.39*avail_w])
+    info.setStyle(TableStyle([
         ("SPAN", (0,0), (-1,0)),
         ("BACKGROUND", (0,0), (-1,0), header_gray),
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
@@ -144,19 +157,17 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         ("ALIGN", (0,0), (-1,0), "CENTER"),
         ("FONTSIZE", (0,0), (-1,-1), 10),
     ]))
-
-    # put info box in a 3-col row so it sits on the left
-    info_row = PdfTable([[student_info, "", ""]], colWidths=[145*mm, 20*mm, 25*mm])
-    info_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP")]))
+    # place the info box to the left with an empty spacer cell
+    info_row = PdfTable([[info, ""]], colWidths=[0.7*avail_w, 0.3*avail_w])
     story.append(info_row)
-    story.append(Spacer(1, 10*mm))
+    story.append(Spacer(1, 16))
 
-    # === Titles centered ===
+    # === Titles ===
     story.append(Paragraph("Report Card", h2))
     story.append(Paragraph(f"For School Year {year}", normal))
-    story.append(Spacer(1, 8*mm))
+    story.append(Spacer(1, 12))
 
-    # === Courses table ===
+    # === Build Course rows ===
     table_data = [["Course Name", "Course Number", "Teacher", "S1", "S2"]]
 
     expanded: List[List[str]] = []
@@ -178,7 +189,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
             elif b:
                 s2 = grade_val or "—"
             else:
-                s1 = grade_val or "—"  # default to S1 if unknown
+                s1 = grade_val or "—"  # default to S1
             expanded.append([nm, cd, teacher, s1, s2])
 
     # de-dup & tidy
@@ -190,7 +201,15 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     clean.sort(key=lambda x: (x[0].lower(), x[1].lower()))
     table_data.extend(clean if clean else [["(no courses found)", "", "", "", ""]])
 
-    courses = PdfTable(table_data, colWidths=[110*mm, 40*mm, 55*mm, 15*mm, 15*mm])
+    # Column widths as fractions of available width (sum must be <= 1.0)
+    cw_name   = 0.58
+    cw_code   = 0.20
+    cw_teacher= 0.14
+    cw_s1     = 0.04
+    cw_s2     = 0.04
+    col_widths = [cw_name*avail_w, cw_code*avail_w, cw_teacher*avail_w, cw_s1*avail_w, cw_s2*avail_w]
+
+    courses = PdfTable(table_data, colWidths=col_widths)
     courses.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), header_gray),
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
@@ -198,36 +217,28 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         ("ALIGN", (1,1), (-1,-1), "CENTER"),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
         ("ROWBACKGROUNDS", (0,1), (-1,-1), [row_alt1, row_alt2]),
-        ("FONTSIZE", (0,0), (-1,-1), 9.5),
-        ("TOPPADDING", (0,0), (-1,-1), 5),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+        ("FONTSIZE", (0,0), (-1,-1), 9.8),
+        ("TOPPADDING", (0,0), (-1,-1), 4.5),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4.5),
     ]))
     story.append(courses)
-    story.append(Spacer(1, 20*mm))
+    story.append(Spacer(1, 36))
 
     # === Centered signature block ===
-    sig_stack: List[Any] = []
+    sig_cells: List[Any] = []
     if pathlib.Path(SIGN_PATH).exists():
-        sig_stack.append(Image(SIGN_PATH, width=55*mm, height=18*mm))
-        sig_stack.append(Spacer(1, 3*mm))
-    sig_stack.append(CenterLine())
-    sig_stack.append(Spacer(1, 2*mm))
-    sig_stack.append(Paragraph(f"Principal - {PRINCIPAL}", normal))
-    sig_stack.append(Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", normal))
+        sig_cells.append(Image(SIGN_PATH, width=160, height=55))  # points
+        sig_cells.append(Spacer(1, 4))
+    sig_cells.append(CenterLine(width=220))
+    sig_cells.append(Spacer(1, 2))
+    sig_cells.append(Paragraph(f"Principal - {PRINCIPAL}", normal))
+    sig_cells.append(Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", normal))
 
-    # center it using a single-cell table spanning the page width
-    story.append(PdfTable([[sig_stack]], colWidths=[200*mm],
-                          style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")])))
-    story.append(Spacer(1, 2*mm))
+    sig_tbl = PdfTable([[sig_cells]], colWidths=[avail_w])
+    sig_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
+    story.append(sig_tbl)
 
-    # Optional footer—uncomment if desired
-    # story.append(Paragraph("<i>Generated from the Cornerstone SIS</i>", normal))
-
-    doc = SimpleDocTemplate(
-        str(pdf_path),
-        pagesize=A4,  # portrait (matches your example)
-        leftMargin=16*mm, rightMargin=16*mm, topMargin=14*mm, bottomMargin=14*mm,
-    )
+    # Build
     doc.build(story)
     print(f"[OK] Generated → {pdf_path}")
     return pdf_path
