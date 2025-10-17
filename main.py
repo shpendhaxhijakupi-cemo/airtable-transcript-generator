@@ -1,13 +1,16 @@
 import os, sys, pathlib
 from datetime import datetime
 from typing import Dict, Any, List, Tuple
+
 from pyairtable import Api
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table as PdfTable, TableStyle, Image, Flowable
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table as PdfTable, TableStyle, Image, Flowable
+)
 from reportlab.lib.styles import getSampleStyleSheet
 
-# -------- ENV --------
+# ---------- ENV ----------
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
 AIRTABLE_BASE_ID = os.environ["AIRTABLE_BASE_ID"]
 TRANSCRIPT_TABLE = os.environ.get("TRANSCRIPT_TABLE", "Students 1221")
@@ -34,7 +37,7 @@ F = {
     "school_year": "School Year",
     "course_name_rollup": "Course Name Rollup (from Southlands Courses Enrollment 3)",
     "course_code_rollup": "Course Code Rollup (from Southlands Courses Enrollment 3)",
-    "teacher": "Teacher",
+    "teacher": "Teacher",        # optional
     "letter": "Grade Letter",
     "percent": "% Total",
 }
@@ -42,7 +45,7 @@ F = {
 api = Api(AIRTABLE_API_KEY)
 table = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_TABLE)
 
-# -------- helpers --------
+# ---------- helpers ----------
 def sget(fields: Dict[str, Any], key: str, default: str = "") -> str:
     v = fields.get(key)
     if v is None: return default
@@ -75,7 +78,7 @@ class CenterLine(Flowable):
         self.canv.setLineWidth(self.thickness)
         self.canv.line(-self.width/2, 0, self.width/2, 0)
 
-# -------- PDF --------
+# ---------- PDF ----------
 def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     student_name = sget(student_fields, F["student_name"]).strip()
     student_id   = sget(student_fields, F["student_id"])
@@ -88,29 +91,29 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     # Page geometry
     doc = SimpleDocTemplate(
         str(pdf_path),
-        pagesize=A4,             # portrait to match template
-        leftMargin=36, rightMargin=36,  # 0.5" margins
-        topMargin=36, bottomMargin=40
+        pagesize=A4,             # portrait
+        leftMargin=36, rightMargin=36,  # 0.5"
+        topMargin=34, bottomMargin=40
     )
     W = doc.width  # printable width
 
     styles = getSampleStyleSheet()
     normal = styles["Normal"]
-    h2 = styles["Heading2"]; h2.alignment = 1; h2.spaceBefore, h2.spaceAfter = 2, 10
+    h2 = styles["Heading2"]; h2.alignment = 1; h2.spaceBefore, h2.spaceAfter = 2, 8
 
-    header_gray = colors.HexColor("#C8C8C8")
-    row_alt1, row_alt2 = colors.whitesmoke, colors.HexColor("#EFEFEF")
+    header_gray = colors.HexColor("#BFBFBF")
+    row_alt1, row_alt2 = colors.whitesmoke, colors.HexColor("#F3F3F3")
 
     story: List[Any] = []
 
-    # === Single header row: StudentInfo | Logo | Address ===
-    # Student Info box (left)
+    # === Header row: Student Info | Logo | Address ===
+    # Student Info box
     info_tbl = PdfTable([
         ["Student Info", ""],
-        ["Name", student_name],
+        ["Name",               student_name],
         ["Current Grade Level", grade],
-        ["Student ID", student_id],
-    ], colWidths=[0.28*W, 0.32*W])
+        ["Student ID",         student_id],
+    ], colWidths=[0.30*W, 0.30*W])
     info_tbl.setStyle(TableStyle([
         ("SPAN", (0,0), (-1,0)),
         ("BACKGROUND", (0,0), (-1,0), header_gray),
@@ -119,16 +122,16 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         ("INNERGRID", (0,0), (-1,-1), 0.4, colors.grey),
         ("ALIGN", (0,0), (-1,0), "CENTER"),
         ("FONTSIZE", (0,0), (-1,-1), 10),
-        ("TOPPADDING", (0,1), (-1,-1), 3.5),
-        ("BOTTOMPADDING", (0,1), (-1,-1), 3.5),
+        ("TOPPADDING", (0,1), (-1,-1), 3.6),
+        ("BOTTOMPADDING", (0,1), (-1,-1), 3.6),
     ]))
 
     # Center logo
     center = []
     if pathlib.Path(LOGO_PATH).exists():
-        center.append(Image(LOGO_PATH, width=120, height=45))
+        center.append(Image(LOGO_PATH, width=118, height=44))  # balanced, crisp
 
-    # Right address block
+    # Right address
     right = [
         Paragraph(f"<b>{SCHOOL_NAME}</b>", normal),
         Paragraph(ADDR_LINE_1, normal),
@@ -137,16 +140,18 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     ]
 
     header = PdfTable([[info_tbl, center, right]],
-                      colWidths=[0.60*W, 0.18*W, 0.22*W])
-    header.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP"),
-                                ("ALIGN", (1,0), (1,0), "CENTER")]))
+                      colWidths=[0.55*W, 0.20*W, 0.25*W])
+    header.setStyle(TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("ALIGN", (1,0), (1,0), "CENTER"),
+    ]))
     story.append(header)
-    story.append(Spacer(1, 18))
+    story.append(Spacer(1, 12))
 
-    # === Titles centered ===
+    # === Titles ===
     story.append(Paragraph("Report Card", h2))
     story.append(Paragraph(f"For School Year {year}", normal))
-    story.append(Spacer(1, 10))
+    story.append(Spacer(1, 8))
 
     # === Courses table ===
     table_data = [["Course Name", "Course Number", "Teacher", "S1", "S2"]]
@@ -182,6 +187,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     courses.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), header_gray),
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTNAME", (0,1), (0,-1), "Helvetica-Bold"),  # bold course names
         ("GRID", (0,0), (-1,-1), 0.35, colors.grey),
         ("ALIGN", (1,1), (-1,-1), "CENTER"),
         ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
@@ -189,11 +195,13 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         ("FONTSIZE", (0,0), (-1,-1), 9.6),
         ("TOPPADDING", (0,0), (-1,-1), 4.2),
         ("BOTTOMPADDING", (0,0), (-1,-1), 4.2),
+        ("LEFTPADDING", (0,0), (-1,-1), 6),
+        ("RIGHTPADDING", (0,0), (-1,-1), 6),
     ]))
     story.append(courses)
-    story.append(Spacer(1, 40))
+    story.append(Spacer(1, 34))
 
-    # === Centered signature block at bottom ===
+    # === Centered signature block ===
     sig_cells = []
     if pathlib.Path(SIGN_PATH).exists():
         sig_cells.append(Image(SIGN_PATH, width=160, height=55))
@@ -211,7 +219,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     print(f"[OK] Generated → {pdf_path}")
     return pdf_path
 
-# -------- main --------
+# ---------- main ----------
 def main():
     rec = table.get(RECORD_ID)
     if not rec or "fields" not in rec:
