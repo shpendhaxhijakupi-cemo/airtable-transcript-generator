@@ -155,7 +155,6 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story: List[Any] = []
 
     # ===== Header with two columns =====
-    header_data = []
     
     # Left column - Student Info
     student_info = [
@@ -165,13 +164,13 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         ["Student ID", student_id],
     ]
     
-    student_table = PdfTable(student_info, colWidths=[doc.width/2 * 0.4, doc.width/2 * 0.6])
+    student_table = PdfTable(student_info, colWidths=[W/2 * 0.4, W/2 * 0.6])
     student_table.setStyle(TableStyle([
         ("SPAN", (0,0), (-1,0)),
         ("BACKGROUND", (0,0), (-1,0), GRAY_HEADER),
-        ("ALIGN", (0,0), (-1,0), TA_CENTER),
-        ("ALIGN", (0,1), (0,-1), TA_LEFT),
-        ("ALIGN", (1,1), (1,-1), TA_LEFT),
+        ("ALIGN", (0,0), (-1,0), "CENTER"),
+        ("ALIGN", (0,1), (0,-1), "LEFT"),
+        ("ALIGN", (1,1), (1,-1), "LEFT"),
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
         ("FONTSIZE", (0,0), (-1,-1), 10),
         ("TOPPADDING", (0,0), (-1,-1), 6),
@@ -190,12 +189,12 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         [ADDR_LINE_3],
     ]
     
-    school_table = PdfTable(school_info, colWidths=[doc.width/2])
+    school_table = PdfTable(school_info, colWidths=[W/2])
     school_table.setStyle(TableStyle([
         ("SPAN", (0,0), (-1,0)),
         ("BACKGROUND", (0,0), (-1,0), GRAY_HEADER),
-        ("ALIGN", (0,0), (-1,0), TA_CENTER),
-        ("ALIGN", (0,1), (0,-1), TA_LEFT),
+        ("ALIGN", (0,0), (-1,0), "CENTER"),
+        ("ALIGN", (0,1), (0,-1), "LEFT"),
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
         ("FONTSIZE", (0,0), (-1,-1), 10),
         ("TOPPADDING", (0,0), (-1,-1), 6),
@@ -207,7 +206,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     
     # Combine both tables in a two-column layout
     main_header = PdfTable([[student_table, school_table]], 
-                          colWidths=[doc.width/2, doc.width/2])
+                          colWidths=[W/2, W/2])
     main_header.setStyle(TableStyle([
         ("VALIGN", (0,0), (-1,-1), "TOP"),
     ]))
@@ -219,7 +218,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     if pathlib.Path(LOGO_PATH).exists():
         logo = Image(LOGO_PATH, width=120, height=44)
         logo_table = PdfTable([[logo]], colWidths=[W])
-        logo_table.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), TA_CENTER)]))
+        logo_table.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
         story.append(logo_table)
         story.append(Spacer(1, 10))
     
@@ -262,8 +261,8 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         ("BACKGROUND", (0,0), (-1,0), GRAY_HEADER),
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
         ("FONTSIZE", (0,0), (-1,-1), 9),
-        ("ALIGN", (0,0), (-1,0), TA_CENTER),
-        ("ALIGN", (3,1), (4,-1), TA_CENTER),  # S1, S2 columns centered
+        ("ALIGN", (0,0), (-1,0), "CENTER"),
+        ("ALIGN", (3,1), (4,-1), "CENTER"),  # S1, S2 columns centered
         ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
         ("GRID", (0,0), (-1,-1), 1, BORDER_GRAY),
         ("TOPPADDING", (0,0), (-1,-1), 6),
@@ -280,16 +279,15 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     if pathlib.Path(SIGNATURE_PATH).exists():
         signature = Image(SIGNATURE_PATH, width=160, height=55)
         sig_data.append([signature])
-        sig_data.append([CenterLine(width=180)])
-    else:
-        sig_data.append([CenterLine(width=180)])
     
+    sig_data.append([CenterLine(width=180)])
+    sig_data.append([Spacer(1, 4)])
     sig_data.append([Paragraph(f"Principal - {PRINCIPAL}", normal_style)])
     sig_data.append([Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", normal_style)])
     
     signature_table = PdfTable(sig_data, colWidths=[W])
     signature_table.setStyle(TableStyle([
-        ("ALIGN", (0,0), (-1,-1), TA_CENTER),
+        ("ALIGN", (0,0), (-1,-1), "CENTER"),
         ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
     ]))
     
