@@ -9,7 +9,8 @@ from reportlab.pdfgen import canvas
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table as PdfTable, TableStyle, Image, Flowable
 )
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
 # ========= ENV =========
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
@@ -44,10 +45,9 @@ F = {
 }
 
 # ========= THEME =========
-# You can tweak these three to change the whole vibe quickly
-GRAY_HEADER = colors.HexColor("#BEBEBE")
-GRAY_ROWALT = [colors.whitesmoke, colors.HexColor("#F4F4F4")]
-BORDER_GRAY = colors.HexColor("#C7C7C7")
+GRAY_HEADER = colors.HexColor("#F0F0F0")
+BORDER_GRAY = colors.HexColor("#CCCCCC")
+DARK_GRAY = colors.HexColor("#333333")
 
 api = Api(AIRTABLE_API_KEY)
 table = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_TABLE)
@@ -107,91 +107,129 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     # Page geometry
     doc = SimpleDocTemplate(
         str(pdf_path),
-        pagesize=A4,                # portrait
-        leftMargin=36, rightMargin=36,  # 0.5"
+        pagesize=A4,
+        leftMargin=36, rightMargin=36,
         topMargin=36, bottomMargin=42
     )
     W = doc.width
 
     styles = getSampleStyleSheet()
-    normal = styles["Normal"]
-    h2 = styles["Heading2"]; h2.alignment = 1
-    h2.fontName = "Helvetica-Bold"
-    h2.spaceBefore, h2.spaceAfter = 2, 8
+    
+    # Custom styles
+    header_style = ParagraphStyle(
+        'HeaderStyle',
+        parent=styles['Normal'],
+        fontSize=14,
+        textColor=DARK_GRAY,
+        alignment=TA_CENTER,
+        spaceAfter=12,
+        fontName='Helvetica-Bold'
+    )
+    
+    subheader_style = ParagraphStyle(
+        'SubheaderStyle',
+        parent=styles['Normal'],
+        fontSize=12,
+        textColor=DARK_GRAY,
+        alignment=TA_CENTER,
+        spaceAfter=20,
+        fontName='Helvetica'
+    )
+    
+    normal_style = ParagraphStyle(
+        'NormalStyle',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=DARK_GRAY,
+        fontName='Helvetica'
+    )
+    
+    bold_style = ParagraphStyle(
+        'BoldStyle',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=DARK_GRAY,
+        fontName='Helvetica-Bold'
+    )
 
     story: List[Any] = []
 
-    # ===== Brand band =====
-    # Thin line + centered logo + school name
-    brand_row = []
-    center_stack: List[Any] = []
-    if pathlib.Path(LOGO_PATH).exists():
-        center_stack.append(Image(LOGO_PATH, width=120, height=44))
-        center_stack.append(Spacer(1, 2))
-    center_stack.append(Paragraph(f"<b>{SCHOOL_NAME}</b>", normal))
-
-    brand = PdfTable([[center_stack]], colWidths=[W])
-    brand.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
-    story.append(brand)
-    # thin divider
-    divider = PdfTable([[""]], colWidths=[W])
-    divider.setStyle(TableStyle([("LINEBELOW",(0,0),(-1,-1),0.7,BORDER_GRAY)]))
-    story.append(divider)
-    story.append(Spacer(1, 8))
-
-    # ===== Cards row: Student Info (left) • School Info (right) =====
-    # Student card
-    student_card = PdfTable([
-        ["Student Info",""],
-        ["Name",               student_name],
-        ["Current Grade Level",grade],
-        ["Student ID",         student_id],
-    ], colWidths=[0.28*W, 0.32*W])
-    student_card.setStyle(TableStyle([
-        ("SPAN",(0,0),(-1,0)),
-        ("BACKGROUND",(0,0),(-1,0),GRAY_HEADER),
-        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("BOX",(0,0),(-1,-1),0.9,colors.black),
-        ("INNERGRID",(0,0),(-1,-1),0.4,colors.grey),
-        ("ALIGN",(0,0),(-1,0),"CENTER"),
-        ("FONTSIZE",(0,0),(-1,-1),10),
-        ("TOPPADDING",(0,1),(-1,-1),4),
-        ("BOTTOMPADDING",(0,1),(-1,-1),4),
+    # ===== Header with two columns =====
+    header_data = []
+    
+    # Left column - Student Info
+    student_info = [
+        [Paragraph("<b>Student Info</b>", bold_style), ""],
+        ["Name", student_name],
+        ["Current Grade Level", grade],
+        ["Student ID", student_id],
+    ]
+    
+    student_table = PdfTable(student_info, colWidths=[doc.width/2 * 0.4, doc.width/2 * 0.6])
+    student_table.setStyle(TableStyle([
+        ("SPAN", (0,0), (-1,0)),
+        ("BACKGROUND", (0,0), (-1,0), GRAY_HEADER),
+        ("ALIGN", (0,0), (-1,0), TA_CENTER),
+        ("ALIGN", (0,1), (0,-1), TA_LEFT),
+        ("ALIGN", (1,1), (1,-1), TA_LEFT),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 10),
+        ("TOPPADDING", (0,0), (-1,-1), 6),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("LEFTPADDING", (0,0), (-1,-1), 8),
+        ("RIGHTPADDING", (0,0), (-1,-1), 8),
+        ("GRID", (0,0), (-1,-1), 1, BORDER_GRAY),
     ]))
-
-    # School card
-    school_card = PdfTable([
-        ["School Info"],
-        [Paragraph(f"<b>{SCHOOL_NAME}</b>", normal)],
+    
+    # Right column - School Info
+    school_info = [
+        [Paragraph("<b>School Info</b>", bold_style)],
+        [SCHOOL_NAME],
         [ADDR_LINE_1],
         [ADDR_LINE_2],
         [ADDR_LINE_3],
-    ], colWidths=[0.34*W])
-    school_card.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,0),GRAY_HEADER),
-        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("BOX",(0,0),(-1,-1),0.9,colors.black),
-        ("ALIGN",(0,0),(-1,0),"CENTER"),
-        ("LEFTPADDING",(0,1),(-1,-1),8),
-        ("RIGHTPADDING",(0,1),(-1,-1),8),
-        ("TOPPADDING",(0,1),(-1,-1),3),
-        ("BOTTOMPADDING",(0,1),(-1,-1),3),
-        ("FONTSIZE",(0,0),(-1,-1),10),
+    ]
+    
+    school_table = PdfTable(school_info, colWidths=[doc.width/2])
+    school_table.setStyle(TableStyle([
+        ("SPAN", (0,0), (-1,0)),
+        ("BACKGROUND", (0,0), (-1,0), GRAY_HEADER),
+        ("ALIGN", (0,0), (-1,0), TA_CENTER),
+        ("ALIGN", (0,1), (0,-1), TA_LEFT),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 10),
+        ("TOPPADDING", (0,0), (-1,-1), 6),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("LEFTPADDING", (0,0), (-1,-1), 8),
+        ("RIGHTPADDING", (0,0), (-1,-1), 8),
+        ("GRID", (0,0), (-1,-1), 1, BORDER_GRAY),
     ]))
+    
+    # Combine both tables in a two-column layout
+    main_header = PdfTable([[student_table, school_table]], 
+                          colWidths=[doc.width/2, doc.width/2])
+    main_header.setStyle(TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+    ]))
+    
+    story.append(main_header)
+    story.append(Spacer(1, 20))
 
-    cards_row = PdfTable([[student_card, "", school_card]],
-                         colWidths=[0.60*W, 0.02*W, 0.38*W])
-    cards_row.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP")]))
-    story.append(cards_row)
-    story.append(Spacer(1, 10))
-
-    # ===== Titles =====
-    story.append(Paragraph("Report Card", h2))
-    story.append(Paragraph(f"For School Year {year}", normal))
-    story.append(Spacer(1, 8))
+    # ===== Report Card Title =====
+    if pathlib.Path(LOGO_PATH).exists():
+        logo = Image(LOGO_PATH, width=120, height=44)
+        logo_table = PdfTable([[logo]], colWidths=[W])
+        logo_table.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), TA_CENTER)]))
+        story.append(logo_table)
+        story.append(Spacer(1, 10))
+    
+    story.append(Paragraph("Report Card", header_style))
+    story.append(Paragraph(f"For School Year {year}", subheader_style))
 
     # ===== Courses table =====
-    table_data = [["Course Name","Course Number","Teacher","S1","S2"]]
+    table_data = [
+        ["Course Name", "Course Number", "Teacher", "S1", "S2"]
+    ]
 
     expanded: List[List[str]] = []
     for r in rows:
@@ -218,38 +256,44 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     clean.sort(key=lambda x: (x[0].lower(), x[1].lower()))
     table_data.extend(clean if clean else [["(no courses found)","","","",""]])
 
-    cw = [0.58*W, 0.20*W, 0.14*W, 0.04*W, 0.04*W]
-    courses = PdfTable(table_data, colWidths=cw)
+    cw = [0.50*W, 0.18*W, 0.20*W, 0.06*W, 0.06*W]
+    courses = PdfTable(table_data, colWidths=cw, repeatRows=1)
     courses.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,0),GRAY_HEADER),
-        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("FONTNAME",(0,1),(0,-1),"Helvetica-Bold"),   # bold course names
-        ("GRID",(0,0),(-1,-1),0.35,colors.grey),
-        ("ALIGN",(1,1),(-1,-1),"CENTER"),
-        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-        ("ROWBACKGROUNDS",(0,1),(-1,-1),GRAY_ROWALT),
-        ("FONTSIZE",(0,0),(-1,-1),9.6),
-        ("TOPPADDING",(0,0),(-1,-1),4.2),
-        ("BOTTOMPADDING",(0,0),(-1,-1),4.2),
-        ("LEFTPADDING",(0,0),(-1,-1),6),
-        ("RIGHTPADDING",(0,0),(-1,-1),6),
+        ("BACKGROUND", (0,0), (-1,0), GRAY_HEADER),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 9),
+        ("ALIGN", (0,0), (-1,0), TA_CENTER),
+        ("ALIGN", (3,1), (4,-1), TA_CENTER),  # S1, S2 columns centered
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("GRID", (0,0), (-1,-1), 1, BORDER_GRAY),
+        ("TOPPADDING", (0,0), (-1,-1), 6),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("LEFTPADDING", (0,0), (-1,-1), 6),
+        ("RIGHTPADDING", (0,0), (-1,-1), 6),
     ]))
     story.append(courses)
-    story.append(Spacer(1, 34))
+    story.append(Spacer(1, 30))
 
-    # ===== Signature block centered =====
-    sig_stack: List[Any] = []
+    # ===== Signature block =====
+    sig_data = []
+    
     if pathlib.Path(SIGNATURE_PATH).exists():
-        sig_stack.append(Image(SIGNATURE_PATH, width=160, height=55))
-        sig_stack.append(Spacer(1, 4))
-    sig_stack.append(CenterLine(width=220))
-    sig_stack.append(Spacer(1, 2))
-    sig_stack.append(Paragraph(f"Principal - {PRINCIPAL}", normal))
-    sig_stack.append(Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", normal))
-
-    sig_tbl = PdfTable([[sig_stack]], colWidths=[W],
-                       style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
-    story.append(sig_tbl)
+        signature = Image(SIGNATURE_PATH, width=160, height=55)
+        sig_data.append([signature])
+        sig_data.append([CenterLine(width=180)])
+    else:
+        sig_data.append([CenterLine(width=180)])
+    
+    sig_data.append([Paragraph(f"Principal - {PRINCIPAL}", normal_style)])
+    sig_data.append([Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", normal_style)])
+    
+    signature_table = PdfTable(sig_data, colWidths=[W])
+    signature_table.setStyle(TableStyle([
+        ("ALIGN", (0,0), (-1,-1), TA_CENTER),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+    ]))
+    
+    story.append(signature_table)
 
     # Build with page border
     doc.build(story, onFirstPage=draw_page_border, onLaterPages=draw_page_border)
