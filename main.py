@@ -10,7 +10,7 @@ from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table as PdfTable, TableStyle, Image, Flowable
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
 # ========= ENV =========
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
@@ -31,7 +31,7 @@ RECORD_ID = os.getenv("RECORD_ID") or (sys.argv[1] if len(sys.argv) > 1 else Non
 if not RECORD_ID:
     sys.exit("[ERROR] Missing RECORD_ID")
 
-# ========= AIRTABLE FIELDS =========
+# Airtable fields
 F = {
     "student_name": "Students Name",
     "student_id": "Student Canvas ID",
@@ -75,6 +75,7 @@ def sget(fields: Dict[str, Any], key: str, default: str = "") -> str:
 def listify(v: Any) -> List[str]:
     if v is None: return []
     if isinstance(v, list): return [str(x).strip() for x in v if str(x).strip()]
+    # Split on commas but keep order; trim empties
     return [p.strip() for p in str(v).split(",") if p.strip()]
 
 def esc(s: str) -> str: return (s or "").replace('"', '\\"')
@@ -116,7 +117,7 @@ def fit_image(path: str, max_w: float, max_h: float) -> Image:
     img._restrictSize(int(iw*scale), int(ih*scale))
     return img
 
-# New: Flowable that draws an image and shifts it horizontally by dx points
+# Shift an image horizontally by dx (pts) while preserving size/aspect
 class ShiftedImage(Flowable):
     def __init__(self, path: str, max_w: float, max_h: float, dx: int = 0):
         super().__init__()
@@ -136,7 +137,7 @@ class ShiftedImage(Flowable):
         return (self.w, self.h)
     def draw(self):
         self.canv.saveState()
-        self.canv.translate(self.dx, 0)  # shift only the image
+        self.canv.translate(self.dx, 0)
         self.canv.drawImage(self.img, 0, 0, width=self.w, height=self.h, mask='auto')
         self.canv.restoreState()
 
@@ -224,7 +225,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         logo_tbl = PdfTable([[logo]], colWidths=[W])
         logo_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
         story.append(logo_tbl)
-        story.append(Spacer(1, LOGO_BOTTOM_SPACE))  # separation before Report Card
+        story.append(Spacer(1, LOGO_BOTTOM_SPACE))
 
     # ======= Title & Year =======
     story.append(Paragraph("Report Card", styles["rc_h1"]))
@@ -237,19 +238,38 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     expanded: List[List[str]] = []
     for r in rows:
         f = r.get("fields", {})
-        names   = listify(f.get(F["course_name_rollup"]))
-        codes   = listify(f.get(F["course_code_rollup"]))
-        teacher = sget(f, F["teacher"])
-        grade_v = sget(f, F["letter"]) or sget(f, F["percent"])
-        n = max(len(names), len(codes))
+
+        # rollups/fields as lists
+        names    = listify(f.get(F["course_name_rollup"]))
+        codes    = listify(f.get(F["course_code_rollup"]))
+        teachers = listify(f.get(F["teacher"]))  # may contain multiple names
+
+        grade_v  = sget(f, F["letter"]) or sget(f, F["percent"])
+
+        # build a single fallback teacher (first unique)
+        fallback_teacher = ""
+        if teachers:
+            uniq = list(dict.fromkeys([t for t in teachers if t.strip()]))
+            fallback_teacher = (uniq[0] if uniq else "").split(",")[0].strip()
+
+        n = max(len(names), len(codes), len(teachers) if teachers else 0)
         for i in range(n):
             nm = names[i] if i < len(names) else ""
             cd = codes[i] if i < len(codes) else ""
+
+            # choose one teacher per row:
+            if teachers and i < len(teachers):
+                tchr = teachers[i]
+            else:
+                tchr = fallback_teacher
+            tchr = tchr.split(",")[0].strip()  # force single teacher if comma-separated
+
             a, b = detect_semester(nm, cd)
             s1 = (grade_v or "—") if (a or not (a or b)) else ""
             s2 = (grade_v or "—") if b else ""
-            expanded.append([nm, cd, teacher, s1, s2])
+            expanded.append([nm, cd, tchr, s1, s2])
 
+    # tidy/sort
     seen, clean = set(), []
     for row in expanded:
         t = tuple(row)
@@ -284,12 +304,12 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     # ======= Signature block (right-aligned) =======
     sig_col_w = W * 0.38
 
-    # Image row: ONLY the image shifts by SIG_IMG_SHIFT
+    # Signature image row (shift only the image)
     if pathlib.Path(SIGNATURE_PATH).exists():
         sig_img = ShiftedImage(SIGNATURE_PATH, max_w=SIG_IMG_MAX_W, max_h=SIG_IMG_MAX_H, dx=SIG_IMG_SHIFT)
         img_tbl = PdfTable([[sig_img]], colWidths=[sig_col_w])
         img_tbl.setStyle(TableStyle([
-            ("ALIGN", (0,0), (-1,-1), "CENTER"),  # center the image stack; dx will shift it
+            ("ALIGN", (0,0), (-1,-1), "CENTER"),
             ("LEFTPADDING",  (0,0), (-1,-1), 0),
             ("RIGHTPADDING", (0,0), (-1,-1), 0),
             ("TOPPADDING",   (0,0), (-1,-1), 0),
@@ -299,7 +319,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     else:
         img_row = [Spacer(1, 0)]
 
-    # Keep line + text centered (unaffected by image shift)
+    # Keep line + text centered
     line_tbl = PdfTable([[CenterLine(width=220, thickness=0.9)]], colWidths=[sig_col_w])
     line_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
 
@@ -309,7 +329,6 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     date_tbl = PdfTable([[Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", styles["rc_small"])]], colWidths=[sig_col_w])
     date_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
 
-    # Vertical stack for the signature column
     sig_stack = [
         img_row,
         [Spacer(1, 3)],
@@ -320,7 +339,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     ]
     sig = PdfTable(sig_stack, colWidths=[sig_col_w])
     sig.setStyle(TableStyle([
-        ("LEFTPADDING",  (0,0), (-1,-1), SIG_LEFTPAD),  # optional whole-block nudge
+        ("LEFTPADDING",  (0,0), (-1,-1), SIG_LEFTPAD),
         ("RIGHTPADDING", (0,0), (-1,-1), 0),
         ("TOPPADDING",   (0,0), (-1,-1), 0),
         ("BOTTOMPADDING",(0,0), (-1,-1), 0),
