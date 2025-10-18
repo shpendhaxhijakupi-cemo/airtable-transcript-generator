@@ -37,22 +37,25 @@ SIGNATURE_PATH = os.environ.get("SIGNATURE_PATH", "signature_principal.png")
 PRINCIPAL      = os.environ.get("PRINCIPAL_NAME", "Ursula Derios")
 SIGN_DATEFMT   = os.environ.get("SIGN_DATE_FMT", "%B %d, %Y")
 
-# Airtable fields (UPDATED PER YOUR REQUEST)
+# Airtable fields (UPDATED)
 F = {
-    "student_name": "Student Name",          # was "Students Name"
+    "student_name": "Student Name",
     "student_id": "Student Canvas ID",
-    "grade_select": "Grade Select",          # header grade now uses Grade Select
+    "grade_select": "Grade Select",          # header grade
     "school_year": "School Year",
 
-    # direct fields
-    "course_name": "Course Name",            # use this for courses
-    "teacher": "Teacher",
-    "letter": "Grade Letter",                # S1/S2 course grade uses this
+    # direct fields for courses
+    "course_name": "Course Name",
+    "course_code": "Course Code",            # <-- Course Number now uses this
+    "assigned_teachers": "Assigned Teachers",# <-- Teacher now uses this (list)
 
-    # rollups (fallback only if needed)
+    # grades
+    "letter": "Grade Letter",                # S1/S2 course grade
+    "percent": "% Total",
+
+    # rollups (fallback only if missing direct fields)
     "course_name_rollup": "Course Name Rollup (from Southlands Courses Enrollment 3)",
     "course_code_rollup": "Course Code Rollup (from Southlands Courses Enrollment 3)",
-    "percent": "% Total",
 }
 
 # ========= THEME =========
@@ -112,7 +115,6 @@ def get_table_and_record(record_id: str):
     raise SystemExit(f"[ERROR] Record {record_id} not found in any configured tables. Last error: {last_err}")
 
 def fetch_group(student_name: str, tbl) -> List[Dict[str, Any]]:
-    # Use the updated "Student Name" field
     formula = f'{{{F["student_name"]}}} = "{esc(student_name)}"'
     return tbl.all(formula=formula)
 
@@ -267,15 +269,17 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     for r in rows:
         f = r.get("fields", {})
 
-        # Use direct Course Name; fallback to rollup if empty
-        names    = listify(f.get(F["course_name"])) or listify(f.get(F["course_name_rollup"]))
-        codes    = listify(f.get(F["course_code_rollup"]))
-        teachers = listify(f.get(F["teacher"]))
+        # Course name + code with fallback to rollups if blank
+        names = listify(f.get(F["course_name"])) or listify(f.get(F["course_name_rollup"]))
+        codes = listify(f.get(F["course_code"])) or listify(f.get(F["course_code_rollup"]))
+
+        # Teachers from Assigned Teachers (list); fallback to first unique
+        teachers = listify(f.get(F["assigned_teachers"]))
 
         # Course grade (S1/S2) uses Grade Letter only
-        grade_v  = sget(f, F["letter"])
+        grade_v = sget(f, F["letter"])
 
-        # Simple teacher fallback
+        # fallback teacher
         fallback_teacher = ""
         if teachers:
             uniq = list(dict.fromkeys([t for t in teachers if t.strip()]))
@@ -375,8 +379,7 @@ def main():
     elif RECORD_ID_SINGLE:
         ids.append(RECORD_ID_SINGLE.strip())
 
-    outdir = pathlib.Path("output")
-    outdir.mkdir(parents=True, exist_ok=True)
+    pathlib.Path("output").mkdir(parents=True, exist_ok=True)
 
     for rid in ids:
         try:
