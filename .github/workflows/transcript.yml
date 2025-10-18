@@ -27,23 +27,24 @@ jobs:
 
       - name: Run script
         env:
-          # Inputs / secrets
           RECORD_ID: ${{ github.event.inputs.record_id }}
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
-          TRANSCRIPT_TABLE: ${{ secrets.TRANSCRIPT_TABLE }}   # e.g., "Students 1221"
-          SCHOOL_NAME: ${{ secrets.SCHOOL_NAME }}             # e.g., "Cornerstone Education Management Organization"
 
-          # Header (shown on the right side)
+          # NEW: list all partner tables here (exact Airtable table names)
+          TRANSCRIPT_TABLES: "Students 1221, Students Ganevas, Students NHCC, Students Phoenix, Students Suthlands, Students Rock Christian, Students B2C"
+
+          # Optional fallback (used if TRANSCRIPT_TABLES is empty)
+          TRANSCRIPT_TABLE: ${{ secrets.TRANSCRIPT_TABLE }}
+
+          SCHOOL_NAME: ${{ secrets.SCHOOL_NAME }}
+
           SCHOOL_HEADER_RIGHT_LINE1: "Cornerstone Online"
           SCHOOL_HEADER_RIGHT_LINE2: "18550 Fajarado St."
           SCHOOL_HEADER_RIGHT_LINE3: "Rowland Heights, CA 91748"
 
-          # Branding assets in repo root
           LOGO_PATH: logo_cornerstone.png
           SIGNATURE_PATH: signature_principal.png
-
-          # Signature text/date
           PRINCIPAL_NAME: "Ursula Derios"
           SIGN_DATE_FMT: "%B %d, %Y"
         run: |
@@ -51,10 +52,8 @@ jobs:
 
       - name: List output directory (debug)
         run: |
-          echo "Root:"
-          ls -la || true
-          echo "Output:"
-          ls -la output || true
+          echo "Root:"; ls -la || true
+          echo "Output:"; ls -la output || true
 
       - name: Upload transcript artifact
         uses: actions/upload-artifact@v4
