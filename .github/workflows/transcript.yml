@@ -3,8 +3,8 @@ name: Generate Transcript
 on:
   workflow_dispatch:
     inputs:
-      record_id:
-        description: "Airtable student record ID (e.g., recXXXXXX)"
+      record_ids:
+        description: "Comma-separated Airtable record IDs (e.g., recAAA,recBBB)"
         required: true
         type: string
 
@@ -27,18 +27,19 @@ jobs:
 
       - name: Run script
         env:
-          RECORD_ID: ${{ github.event.inputs.record_id }}
+          # Inputs / secrets
+          RECORD_IDS: ${{ github.event.inputs.record_ids }}
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
 
-          # NEW: list all partner tables here (exact Airtable table names)
-          TRANSCRIPT_TABLES: "Students 1221, Students Ganevas, Students NHCC, Students Phoenix, Students Suthlands, Students Rock Christian, Students B2C"
+          # List of partner tables to search (exact Airtable table names)
+          TRANSCRIPT_TABLES: "B2C Courses Enrollment, Southlands Courses Enrollment, Phoenix Christian Courses Enrollment, 1211 Courses Enrollment, NHCC Courses Enrollment, Rock Christian Courses Enrollment, Ganevas Courses Enrollment"
 
-          # Optional fallback (used if TRANSCRIPT_TABLES is empty)
+          # Optional single-table fallback (not needed if TRANSCRIPT_TABLES is set)
           TRANSCRIPT_TABLE: ${{ secrets.TRANSCRIPT_TABLE }}
 
+          # Branding / header
           SCHOOL_NAME: ${{ secrets.SCHOOL_NAME }}
-
           SCHOOL_HEADER_RIGHT_LINE1: "Cornerstone Online"
           SCHOOL_HEADER_RIGHT_LINE2: "18550 Fajarado St."
           SCHOOL_HEADER_RIGHT_LINE3: "Rowland Heights, CA 91748"
@@ -58,6 +59,6 @@ jobs:
       - name: Upload transcript artifact
         uses: actions/upload-artifact@v4
         with:
-          name: transcript
+          name: transcripts
           path: output/*.pdf
           if-no-files-found: error
