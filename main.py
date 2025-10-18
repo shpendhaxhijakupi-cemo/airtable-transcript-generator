@@ -53,12 +53,12 @@ ACCENT      = colors.HexColor("#0C4A6E")
 
 # ========= TWEAK KNOBS (defaults keep current look) =========
 TOP_GUTTER_PTS   = 200        # separation between Student Info (left) and School block (right)
-LOGO_MAX_W_PCT   = float(os.environ.get("LOGO_MAX_W_PCT", "0.22"))  # % of page text width
-LOGO_MAX_H_PT    = int(os.environ.get("LOGO_MAX_H_PT", "56"))       # points
+LOGO_MAX_W_PCT   = float(os.environ.get("LOGO_MAX_W_PCT", "0.30"))  # % of page text width
+LOGO_MAX_H_PT    = int(os.environ.get("LOGO_MAX_H_PT", "72"))       # points
 LOGO_BOTTOM_SPACE= int(os.environ.get("LOGO_BOTTOM_SPACE", "15"))    # space under logo before title
 
 SIG_LEFTPAD      = 0        # nudge the entire signature stack (image + line + text) to the right
-SIG_IMG_SHIFT    = int(os.environ.get("SIG_IMG_SHIFT", "-10"))  # shift ONLY signature image (pts; + right, - left)
+SIG_IMG_SHIFT    = int(os.environ.get("SIG_IMG_SHIFT", "-50"))  # shift ONLY signature image (pts; + right, - left)
 SIG_IMG_MAX_W    = int(os.environ.get("SIG_IMG_MAX_W", "160"))
 SIG_IMG_MAX_H    = int(os.environ.get("SIG_IMG_MAX_H", "50"))
 
