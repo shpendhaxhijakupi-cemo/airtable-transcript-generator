@@ -24,18 +24,18 @@ TRANSCRIPT_TABLE_FALLBACK = os.environ.get("TRANSCRIPT_TABLE", "Students 1221")
 RECORD_IDS_ENV = os.getenv("RECORD_IDS", "").strip()
 RECORD_ID_SINGLE = os.getenv("RECORD_ID") or (sys.argv[1] if len(sys.argv) > 1 else "")
 
-# BEHAVIOR TOGGLES
-# 0 (default): use ONLY explicit record ids you provide
-# 1: merge rows for the student's name across ALL tables (previous behavior)
+# BEHAVIOR TOGGLE
+# 0 (default): include ONLY the explicit record ids you provide
+# 1: merge rows for the student's name across ALL tables
 INCLUDE_MATCH_BY_NAME = os.getenv("INCLUDE_MATCH_BY_NAME", "0").strip() == "1"
 
 if not RECORD_IDS_ENV and not RECORD_ID_SINGLE:
     sys.exit("[ERROR] Provide at least one record id via RECORD_IDS (comma-separated) or RECORD_ID")
 
-SCHOOL_NAME = os.environ.get("SCHOOL_NAME", "Southlands Schools Online")
-ADDR_LINE_1  = os.environ.get("SCHOOL_HEADER_RIGHT_LINE1", "18550 Fajarado St.")
-ADDR_LINE_2  = os.environ.get("SCHOOL_HEADER_RIGHT_LINE2", "Rowland Heights, CA 91748")
-ADDR_LINE_3  = os.environ.get("SCHOOL_HEADER_RIGHT_LINE3", "")
+SCHOOL_NAME = os.environ.get("SCHOOL_NAME", "Cornerstone Education Management Organization")
+ADDR_LINE_1  = os.environ.get("SCHOOL_HEADER_RIGHT_LINE1", "Cornerstone Online")
+ADDR_LINE_2  = os.environ.get("SCHOOL_HEADER_RIGHT_LINE2", "18550 Fajarado St.")
+ADDR_LINE_3  = os.environ.get("SCHOOL_HEADER_RIGHT_LINE3", "Rowland Heights, CA 91748")
 
 LOGO_PATH      = os.environ.get("LOGO_PATH", "logo_cornerstone.png")
 SIGNATURE_PATH = os.environ.get("SIGNATURE_PATH", "signature_principal.png")
@@ -91,6 +91,7 @@ def sget(fields: Dict[str, Any], key: str, default: str = "") -> str:
 def listify(v: Any) -> List[str]:
     if v is None: return []
     if isinstance(v, list): return [str(x).strip() for x in v if str(x).strip()]
+    # split on commas for comma-separated entries
     return [p.strip() for p in str(v).split(",") if p.strip()]
 
 def esc(s: str) -> str:
@@ -112,10 +113,11 @@ def get_rec_and_table(record_id: str):
     last_err = None
     for tname in table_names():
         try:
-            return try_get(tname, record_id)
+            t, r = try_get(tname, record_id)
+            print(f"[INFO] Found record {record_id} in table: {tname}")
+            return t, r
         except Exception as e:
             last_err = e
-            # quiet-ish debug:
             print(f"[DEBUG] Not in '{tname}': {e}")
     raise SystemExit(f"[ERROR] Record {record_id} not found in any configured tables. Last error: {last_err}")
 
@@ -189,6 +191,57 @@ def safe_filename(raw: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
     return s.strip("_") or "file"
 
+# ---- strict pairing for course rows ----
+def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
+    """
+    Build rows for a single record without creating blanks:
+    - Pair Course Name with Course Code.
+    - Use teacher at same index if available; otherwise first teacher.
+    - Never emit a row when both name and code are empty.
+    """
+    names = listify(fields.get(F["course_name"])) or listify(fields.get(F["course_name_rollup"]))
+    codes = listify(fields.get(F["course_code"])) or listify(fields.get(F["course_code_rollup"]))
+    teachers = listify(fields.get(F["assigned_teachers"]))
+    grade_v = sget(fields, F["letter"])
+
+    # Normalize lengths (pairing logic)
+    if not names and not codes:
+        return []
+
+    if not names:
+        names = [""] * len(codes)
+    if not codes:
+        codes = [""] * len(names)
+
+    if len(names) != len(codes):
+        if len(names) == 1 and len(codes) > 1:
+            names = [names[0]] * len(codes)
+        elif len(codes) == 1 and len(names) > 1:
+            codes = [codes[0]] * len(names)
+        else:
+            m = min(len(names), len(codes))
+            names, codes = names[:m], codes[:m]
+
+    first_teacher = teachers[0].split(",")[0].strip() if teachers else ""
+    rows: List[List[str]] = []
+
+    for i in range(len(names)):
+        nm = names[i].strip()
+        cd = codes[i].strip()
+        tchr = (teachers[i] if i < len(teachers) else first_teacher)
+        tchr = tchr.split(",")[0].strip()
+
+        # Skip if both empty (prevents the phantom blank rows)
+        if not (nm or cd):
+            continue
+
+        a, b = detect_semester(nm, cd)
+        s1 = (grade_v or "—") if (a or not (a or b)) else ""
+        s2 = (grade_v or "—") if b else ""
+        rows.append([nm, cd, tchr, s1, s2])
+
+    return rows
+
 # ========= PDF =========
 def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     student_name = sget(student_fields, F["student_name"]).strip()
@@ -217,7 +270,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
     story: List[Any] = []
 
-    # ===== Header strip =====
+    # Header strip
     left_data = [
         [Paragraph("<b>Student Info</b>", styles["rc_bold"]), ""],
         ["Name", Paragraph(student_name, styles["rc_body"])],
@@ -266,33 +319,11 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(Paragraph(f"For School Year {year}", styles["rc_h2"]))
     story.append(Spacer(1, 8))
 
-    # ===== Courses =====
+    # Courses
     table_data = [["Course Name", "Course Number", "Teacher", "S1", "S2"]]
     expanded: List[List[str]] = []
-
     for r in rows:
-        f = r.get("fields", {})
-
-        names = listify(f.get(F["course_name"])) or listify(f.get(F["course_name_rollup"]))
-        codes = listify(f.get(F["course_code"])) or listify(f.get(F["course_code_rollup"]))
-        teachers = listify(f.get(F["assigned_teachers"]))
-        grade_v = sget(f, F["letter"])  # S1/S2 grade
-
-        fallback_teacher = ""
-        if teachers:
-            uniq = list(dict.fromkeys([t for t in teachers if t.strip()]))
-            fallback_teacher = (uniq[0] if uniq else "").split(",")[0].strip()
-
-        n = max(len(names), len(codes), len(teachers) if teachers else 0)
-        for i in range(n):
-            nm = names[i] if i < len(names) else ""
-            cd = codes[i] if i < len(codes) else ""
-            tchr = (teachers[i] if (teachers and i < len(teachers)) else fallback_teacher).split(",")[0].strip()
-
-            a, b = detect_semester(nm, cd)
-            s1 = (grade_v or "—") if (a or not (a or b)) else ""
-            s2 = (grade_v or "—") if b else ""
-            expanded.append([nm, cd, tchr, s1, s2])
+        expanded.extend(build_course_rows(r.get("fields", {})))
 
     # de-dup & sort
     seen: Set[Tuple[str, str, str, str, str]] = set()
@@ -327,7 +358,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(courses)
     story.append(Spacer(1, 10))
 
-    # ===== Signature =====
+    # Signature
     sig_col_w = W * 0.38
     if pathlib.Path(SIGNATURE_PATH).exists():
         sig_img = ShiftedImage(SIGNATURE_PATH, max_w=SIG_IMG_MAX_W, max_h=SIG_IMG_MAX_H, dx=SIG_IMG_SHIFT)
@@ -371,7 +402,7 @@ def main():
 
     for rid in ids:
         try:
-            t, rec = get_rec_and_table(rid)
+            _, rec = get_rec_and_table(rid)
             fields = rec.get("fields", {})
             raw = fields.get(F["student_name"])
             name = raw[0] if isinstance(raw, list) and raw else str(raw or "")
@@ -383,11 +414,9 @@ def main():
                 name_to_header[name] = fields
 
             if INCLUDE_MATCH_BY_NAME:
-                # (old behavior) pull all rows for this name across all tables
                 rows = fetch_rows_for_name_across_all_tables(name)
             else:
-                # strict mode: include ONLY the explicit records
-                rows = [rec]
+                rows = [rec]  # STRICT: only the explicit record
 
             name_to_rows.setdefault(name, []).extend(rows)
 
