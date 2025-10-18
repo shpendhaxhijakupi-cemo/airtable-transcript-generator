@@ -2,7 +2,7 @@ import os, sys, pathlib, re
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Set
 
-import requests
+import requests  # NEW
 from pyairtable import Api
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
@@ -44,7 +44,8 @@ SIGN_DATEFMT   = os.environ.get("SIGN_DATE_FMT", "%B %d, %Y")
 # ========= LOG TABLE (literal table name is "TRANSCRIPT_LOG_TABLE") =========
 TRANSCRIPT_LOG_TABLE = os.environ.get("TRANSCRIPT_LOG_TABLE", "TRANSCRIPT_LOG_TABLE")
 
-# Map your log table column names (override in workflow env if they differ)
+# Map your log table column names (override in workflow env if they differ).
+# Set any to "" to skip writing that field.
 LOG_FIELD_STUDENT_NAME      = os.environ.get("LOG_FIELD_STUDENT_NAME",      "Student Name")
 LOG_FIELD_STUDENT_ID        = os.environ.get("LOG_FIELD_STUDENT_ID",        "Student Canvas ID")
 LOG_FIELD_SCHOOL_YEAR       = os.environ.get("LOG_FIELD_SCHOOL_YEAR",       "School Year")
@@ -255,32 +256,58 @@ def summarize_courses(rows: List[Dict[str, Any]]) -> str:
             lines.append(f"{nm} — {cd}" if cd else nm)
     return "\n".join(lines) if lines else ""
 
-# ---- DIRECT ATTACHMENT UPLOAD TO AIRTABLE ----
-def upload_attachment_to_airtable(file_path: pathlib.Path) -> Dict[str, Any]:
+# ---- NEW: Attach PDF to a log record (pyairtable first, then Web API fallback) ----
+def attach_pdf_to_log_record(log_table, rec_id: str, field_name: str, pdf_path: str):
     """
-    Upload local PDF to Airtable's attachment service and return an attachment object.
-    IMPORTANT: requires 'X-Airtable-Application-Id' header (your BASE ID) or you'll get 404.
+    Attach a local PDF to an Airtable Attachment field.
+    Strategy:
+      1) pyairtable.upload_attachment()
+      2) Web API /v0/bases/{BASE_ID}/attachments → update record with {"field":[{"id": upload_id}]}
     """
-    url = "https://content.airtable.com/v0/attachments"
-    headers = {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-        "X-Airtable-Application-Id": AIRTABLE_BASE_ID,
-    }
-    with open(file_path, "rb") as f:
-        files = {"file": (file_path.name, f, "application/pdf")}
-        resp = requests.post(url, headers=headers, files=files, timeout=60)
+    if not field_name:
+        print("[INFO] LOG_FIELD_PDF_ATTACHMENT is empty → skipping file attach.")
+        return
+    if not os.path.isfile(pdf_path):
+        print(f"[WARN] PDF not found at {pdf_path} → skipping attachment.")
+        return
 
-    if resp.status_code >= 300:
-        raise RuntimeError(f"Attachment upload failed ({resp.status_code}): {resp.text}")
+    filename = os.path.basename(pdf_path)
 
-    data = resp.json()
-    if isinstance(data, dict) and data.get("id"):
-        return data
-    if isinstance(data, dict) and data.get("attachments"):
-        return data["attachments"][0]
-    if isinstance(data, list) and data and isinstance(data[0], dict):
-        return data[0]
-    raise RuntimeError(f"Unexpected attachment response: {resp.text}")
+    # 1) Try pyairtable helper
+    try:
+        with open(pdf_path, "rb") as fh:
+            content = fh.read()
+        log_table.upload_attachment(
+            rec_id,
+            field=field_name,
+            filename=filename,
+            content=content,
+            content_type="application/pdf",
+        )
+        print(f"[OK] Attached PDF via pyairtable.upload_attachment → field '{field_name}'.")
+        return
+    except Exception as e:
+        print(f"[WARN] pyairtable.upload_attachment failed ({e}). Trying Web API fallback…")
+
+    # 2) Web API fallback (Upload Attachment → link by id)
+    try:
+        with open(pdf_path, "rb") as fh:
+            files = {"file": (filename, fh, "application/pdf")}
+            r = requests.post(
+                f"https://api.airtable.com/v0/bases/{AIRTABLE_BASE_ID}/attachments",
+                headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"},
+                files=files,
+                timeout=60,
+            )
+        r.raise_for_status()
+        upload_id = r.json().get("id")
+        if not upload_id:
+            raise RuntimeError(f"No 'id' returned from upload-attachment endpoint. Response: {r.text}")
+
+        log_table.update(rec_id, {field_name: [{"id": upload_id}]})
+        print("[OK] Attached PDF via Web API upload-attachment + record update.")
+    except Exception as e:
+        print(f"[WARN] PDF attachment upload failed even with fallback: {e}")
 
 # ---- LOG ONE ROW INTO YOUR TRANSCRIPT_LOG_TABLE ----
 def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
@@ -298,7 +325,7 @@ def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows:
     courses_text = summarize_courses(rows)
     source_ids   = ",".join({ r.get("id","") for r in rows if r.get("id") })
 
-    # Build payload only using the column names you configured (non-empty)
+    # Build payload only using configured column names (skip empty ones)
     payload = {}
     if LOG_FIELD_STUDENT_NAME:   payload[LOG_FIELD_STUDENT_NAME]   = student_name
     if LOG_FIELD_STUDENT_ID:     payload[LOG_FIELD_STUDENT_ID]     = student_id
@@ -308,19 +335,18 @@ def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows:
     if LOG_FIELD_COURSES_TEXT:   payload[LOG_FIELD_COURSES_TEXT]   = courses_text
     if LOG_FIELD_SOURCE_IDS:     payload[LOG_FIELD_SOURCE_IDS]     = source_ids
 
-    # Upload the PDF and attach it
     try:
-        attachment_obj = upload_attachment_to_airtable(pdf_path)
-        if LOG_FIELD_PDF_ATTACHMENT:
-            payload[LOG_FIELD_PDF_ATTACHMENT] = [attachment_obj]
-    except Exception as e:
-        print(f"[WARN] PDF attachment upload failed: {e}")
-
-    try:
-        tlog.create(payload)
+        rec = tlog.create(payload)
         print(f"[OK] Logged transcript to '{TRANSCRIPT_LOG_TABLE}' ({student_name}, {year})")
     except Exception as e:
         print(f"[WARN] Failed to create log record: {e}")
+        return
+
+    # Try to attach the PDF file to the attachment field (if configured)
+    try:
+        attach_pdf_to_log_record(tlog, rec["id"], LOG_FIELD_PDF_ATTACHMENT, str(pdf_path))
+    except Exception as e:
+        print(f"[WARN] Attach step failed: {e}")
 
 # ========= PDF =========
 def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
