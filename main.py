@@ -1,7 +1,8 @@
-import os, sys, pathlib, re
+import os, sys, pathlib, re, json
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Set
 
+import requests
 from pyairtable import Api
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
@@ -16,7 +17,7 @@ from reportlab.lib.enums import TA_CENTER
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
 AIRTABLE_BASE_ID = os.environ["AIRTABLE_BASE_ID"]
 
-# Try all partner tables, comma-separated. Fallback to TRANSCRIPT_TABLE or "Students 1221".
+# Try partner tables (comma-separated). Fallback to TRANSCRIPT_TABLE or "Students 1221".
 TRANSCRIPT_TABLES_ENV = os.environ.get("TRANSCRIPT_TABLES", "")
 TRANSCRIPT_TABLE_FALLBACK = os.environ.get("TRANSCRIPT_TABLE", "Students 1221")
 
@@ -24,9 +25,7 @@ TRANSCRIPT_TABLE_FALLBACK = os.environ.get("TRANSCRIPT_TABLE", "Students 1221")
 RECORD_IDS_ENV = os.getenv("RECORD_IDS", "").strip()
 RECORD_ID_SINGLE = os.getenv("RECORD_ID") or (sys.argv[1] if len(sys.argv) > 1 else "")
 
-# BEHAVIOR TOGGLE
-# 0 (default): include ONLY the explicit record ids you provide
-# 1: merge rows for the student's name across ALL tables
+# 0 (default): only explicit record IDs. 1: merge rows by student name across all tables.
 INCLUDE_MATCH_BY_NAME = os.getenv("INCLUDE_MATCH_BY_NAME", "0").strip() == "1"
 
 if not RECORD_IDS_ENV and not RECORD_ID_SINGLE:
@@ -42,9 +41,8 @@ SIGNATURE_PATH = os.environ.get("SIGNATURE_PATH", "signature_principal.png")
 PRINCIPAL      = os.environ.get("PRINCIPAL_NAME", "Ursula Derios")
 SIGN_DATEFMT   = os.environ.get("SIGN_DATE_FMT", "%B %d, %Y")
 
-# ---- NEW: logging table + public url base (for Airtable attachment) ----
-TRANSCRIPT_LOG_TABLE = os.environ.get("TRANSCRIPT_LOG_TABLE", "Transcripts Log")
-PUBLIC_PDF_BASE_URL  = os.environ.get("PUBLIC_PDF_BASE_URL", "").rstrip("/")
+# ---- LOG TABLE (literal table name is "TRANSCRIPT_LOG_TABLE") ----
+TRANSCRIPT_LOG_TABLE = os.environ.get("TRANSCRIPT_LOG_TABLE", "TRANSCRIPT_LOG_TABLE")
 
 # Airtable fields
 F = {
@@ -53,15 +51,12 @@ F = {
     "grade_select": "Grade Select",
     "school_year": "School Year",
 
-    # direct course fields
     "course_name": "Course Name",
     "course_code": "Course Code",              # -> Course Number
     "assigned_teachers": "Assigned Teachers",  # -> Teacher (first)
 
-    # grades
-    "letter": "Grade Letter",                  # -> S1/S2 grade value
+    "letter": "Grade Letter",                  # -> S1/S2
 
-    # rollups (fallbacks only)
     "course_name_rollup": "Course Name Rollup (from Southlands Courses Enrollment 3)",
     "course_code_rollup": "Course Code Rollup (from Southlands Courses Enrollment 3)",
 }
@@ -237,17 +232,40 @@ def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
 
     return rows
 
-# ---- NEW: summarize & log to Airtable ----
+# ---- summarize & log to Airtable (with direct attachment upload) ----
 def summarize_courses(rows: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for r in rows:
         f = r.get("fields", {})
         local = build_course_rows(f)
-        for nm, cd, *_rest in local:
-            if not (nm or cd): 
+        for nm, cd, *_ in local:
+            if not (nm or cd):
                 continue
             lines.append(f"{nm} — {cd}" if cd else nm)
     return "\n".join(lines) if lines else ""
+
+def upload_attachment_to_airtable(file_path: pathlib.Path) -> Dict[str, Any]:
+    """
+    Uploads the local file to Airtable's attachment service and returns the attachment object.
+    Requires AIRTABLE_API_KEY. Uses official content endpoint.
+    """
+    url = "https://content.airtable.com/v0/attachments"
+    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
+    with open(file_path, "rb") as f:
+        files = {"file": (file_path.name, f, "application/pdf")}
+        resp = requests.post(url, headers=headers, files=files, timeout=60)
+    if resp.status_code >= 300:
+        raise RuntimeError(f"Attachment upload failed ({resp.status_code}): {resp.text}")
+    data = resp.json()
+    # Response is a dict with 'id', 'url', 'filename', etc., or sometimes a list.
+    if isinstance(data, dict) and data.get("id"):
+        return data
+    if isinstance(data, dict) and data.get("attachments"):
+        att = data["attachments"][0]
+        return att
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        return data[0]
+    raise RuntimeError(f"Unexpected attachment response: {resp.text}")
 
 def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     try:
@@ -263,8 +281,6 @@ def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows:
     run_at_iso   = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     courses_text = summarize_courses(rows)
 
-    pdf_url = f"{PUBLIC_PDF_BASE_URL}/{pdf_path.name}" if PUBLIC_PDF_BASE_URL else ""
-
     payload = {
         "Student Name": student_name,
         "Student Canvas ID": student_id,
@@ -273,16 +289,20 @@ def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows:
         "Transcript Run At (ISO)": run_at_iso,
         "Course List (text)": courses_text,
         "Source Record IDs (csv)": ",".join({ r.get("id","") for r in rows if r.get("id") }),
-        "PDF URL": pdf_url,
     }
-    if pdf_url:
-        payload["Transcript PDF"] = [{"url": pdf_url, "filename": pdf_path.name}]
+
+    # Upload the actual PDF to Airtable and attach it
+    try:
+        attachment_obj = upload_attachment_to_airtable(pdf_path)
+        payload["Transcript PDF"] = [attachment_obj]
+    except Exception as e:
+        print(f"[WARN] PDF attachment upload failed: {e}")
 
     try:
         tlog.create(payload)
         print(f"[OK] Logged transcript to '{TRANSCRIPT_LOG_TABLE}' ({student_name}, {year})")
     except Exception as e:
-        print(f"[WARN] Failed to log transcript: {e}")
+        print(f"[WARN] Failed to create log record: {e}")
 
 # ========= PDF =========
 def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
@@ -367,7 +387,6 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     for r in rows:
         expanded.extend(build_course_rows(r.get("fields", {})))
 
-    # de-dup & sort
     seen: Set[Tuple[str, str, str, str, str]] = set()
     clean: List[List[str]] = []
     for row in expanded:
@@ -379,7 +398,8 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         clean = [["(no courses found)", "", "", "", ""]]
     table_data.extend(clean)
 
-    cw = [0.46*W, 0.18*W, 0.22*W, 0.07*W, 0.07*W]
+    Wc = W
+    cw = [0.46*Wc, 0.18*Wc, 0.22*Wc, 0.07*Wc, 0.07*Wc]
     courses = PdfTable(table_data, colWidths=cw, repeatRows=1)
     courses.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), ACCENT),
@@ -431,14 +451,12 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
 # ========= main =========
 def main():
-    # collect ids
     ids: List[str] = []
     if RECORD_IDS_ENV:
         ids.extend([x.strip() for x in RECORD_IDS_ENV.split(",") if x.strip()])
     elif RECORD_ID_SINGLE:
         ids.append(RECORD_ID_SINGLE.strip())
 
-    # resolve records & group by student name
     name_to_header: Dict[str, Dict[str, Any]] = {}
     name_to_rows: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -458,7 +476,7 @@ def main():
             if INCLUDE_MATCH_BY_NAME:
                 rows = fetch_rows_for_name_across_all_tables(name)
             else:
-                rows = [rec]  # STRICT: only the explicit record
+                rows = [rec]
 
             name_to_rows.setdefault(name, []).extend(rows)
 
@@ -470,14 +488,12 @@ def main():
     if not name_to_header:
         sys.exit("[ERROR] No usable records resolved from the provided IDs.")
 
-    # build one transcript per student name
     for student_name, header_fields in name_to_header.items():
         rows = name_to_rows.get(student_name, [])
         if not rows:
             print(f"[WARN] No rows for {student_name}; using header only.")
             rows = [{"fields": header_fields}]
         pdf_file = build_pdf(header_fields, rows)
-        # NEW: write log row (+ optional attachment) to Airtable
         log_to_airtable(pdf_file, header_fields, rows)
 
 if __name__ == "__main__":
