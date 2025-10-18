@@ -3,14 +3,27 @@ name: Generate Transcript
 on:
   workflow_dispatch:
     inputs:
-      record_ids:
-        description: "Comma-separated Airtable record IDs (e.g., recAAA,recBBB)"
-        required: true
+      record_id:
+        description: "Single Airtable record ID (e.g., recXXXXXX). Leave empty if using 'record_ids'."
+        required: false
         type: string
+      record_ids:
+        description: "Comma-separated Airtable record IDs (e.g., recA,recB,recC)."
+        required: false
+        type: string
+      include_match_by_name:
+        description: "Also pull all rows for each student's name across ALL enrollment tables? (0 or 1)"
+        required: false
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "1"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,27 +40,48 @@ jobs:
 
       - name: Run script
         env:
-          # Inputs / secrets
-          RECORD_IDS: ${{ github.event.inputs.record_ids }}
+          # ---- REQUIRED SECRETS (repository secrets) ----
           AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
 
-          # List of partner tables to search (exact Airtable table names)
+          # ---- INPUTS → env expected by main.py ----
+          RECORD_ID:  ${{ github.event.inputs.record_id }}
+          RECORD_IDS: ${{ github.event.inputs.record_ids }}
+          INCLUDE_MATCH_BY_NAME: ${{ github.event.inputs.include_match_by_name }}
+
+          # ---- Enrollment tables to search (comma separated, exact Airtable table names) ----
           TRANSCRIPT_TABLES: "B2C Courses Enrollment, Southlands Courses Enrollment, Phoenix Christian Courses Enrollment, 1211 Courses Enrollment, NHCC Courses Enrollment, Rock Christian Courses Enrollment, Ganevas Courses Enrollment"
 
-          # Optional single-table fallback (not needed if TRANSCRIPT_TABLES is set)
-          TRANSCRIPT_TABLE: ${{ secrets.TRANSCRIPT_TABLE }}
-
-          # Branding / header
-          SCHOOL_NAME: ${{ secrets.SCHOOL_NAME }}
+          # ---- Branding / header info (non-sensitive) ----
+          SCHOOL_NAME: "Cornerstone Education Management Organization"
           SCHOOL_HEADER_RIGHT_LINE1: "Cornerstone Online"
           SCHOOL_HEADER_RIGHT_LINE2: "18550 Fajarado St."
           SCHOOL_HEADER_RIGHT_LINE3: "Rowland Heights, CA 91748"
-
-          LOGO_PATH: logo_cornerstone.png
-          SIGNATURE_PATH: signature_principal.png
+          LOGO_PATH: "logo_cornerstone.png"
+          SIGNATURE_PATH: "signature_principal.png"
           PRINCIPAL_NAME: "Ursula Derios"
           SIGN_DATE_FMT: "%B %d, %Y"
+
+          # ---- Optional logo & signature sizing tweaks (safe to leave as defaults) ----
+          LOGO_MAX_W_PCT: "0.30"
+          LOGO_MAX_H_PT: "72"
+          LOGO_BOTTOM_SPACE: "15"
+          SIG_IMG_SHIFT: "-90"
+          SIG_IMG_MAX_W: "160"
+          SIG_IMG_MAX_H: "50"
+
+          # ---- LOG TABLE (write-back of summary + PDF attachment) ----
+          TRANSCRIPT_LOG_TABLE: "TRANSCRIPT_LOG_TABLE"    # Airtable table name
+
+          # Column names in that table (set to "" if a column doesn't exist and should be skipped)
+          LOG_FIELD_STUDENT_NAME: "Student Name"
+          LOG_FIELD_STUDENT_ID: "Student Canvas ID"
+          LOG_FIELD_SCHOOL_YEAR: "School Year"
+          LOG_FIELD_GRADE_LEVEL: "Grade Level"
+          LOG_FIELD_RUN_AT: "Transcript Run At (ISO)"
+          LOG_FIELD_COURSES_TEXT: "Course List (text)"
+          LOG_FIELD_SOURCE_IDS: "Source Record IDs (csv)"
+          LOG_FIELD_PDF_ATTACHMENT: "Transcript PDF"      # must be an Attachment field
         run: |
           python main.py
 
@@ -56,7 +90,7 @@ jobs:
           echo "Root:"; ls -la || true
           echo "Output:"; ls -la output || true
 
-      - name: Upload transcript artifact
+      - name: Upload transcript artifact(s)
         uses: actions/upload-artifact@v4
         with:
           name: transcripts
