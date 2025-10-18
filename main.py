@@ -58,7 +58,7 @@ LOGO_MAX_H_PT    = int(os.environ.get("LOGO_MAX_H_PT", "72"))       # points
 LOGO_BOTTOM_SPACE= int(os.environ.get("LOGO_BOTTOM_SPACE", "15"))    # space under logo before title
 
 SIG_LEFTPAD      = 0        # nudge the entire signature stack (image + line + text) to the right
-SIG_IMG_SHIFT    = int(os.environ.get("SIG_IMG_SHIFT", "-150"))  # shift ONLY signature image (pts; + right, - left)
+SIG_IMG_SHIFT    = int(os.environ.get("SIG_IMG_SHIFT", "-90"))  # shift ONLY signature image (pts; + right, - left)
 SIG_IMG_MAX_W    = int(os.environ.get("SIG_IMG_MAX_W", "160"))
 SIG_IMG_MAX_H    = int(os.environ.get("SIG_IMG_MAX_H", "50"))
 
