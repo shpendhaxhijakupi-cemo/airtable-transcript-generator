@@ -52,8 +52,8 @@ INK         = colors.HexColor("#0F172A")
 ACCENT      = colors.HexColor("#0C4A6E")
 
 # ========= TWEAK KNOBS (all 0 = current look unchanged) =========
-TOP_GUTTER_PTS = 0   # separation between top-left Student Info and top-right School block
-SIG_LEFTPAD    = 0   # nudge the entire signature stack (image+line+text) to the right
+TOP_GUTTER_PTS = 50   # separation between top-left Student Info and top-right School block
+SIG_LEFTPAD    = -20   # nudge the entire signature stack (image+line+text) to the right
 SIG_IMG_SHIFT  = 0   # nudge ONLY the signature image (pts). + right, - left
 
 api = Api(AIRTABLE_API_KEY)
