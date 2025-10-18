@@ -1,4 +1,4 @@
-import os, sys, pathlib, re, json
+import os, sys, pathlib, re
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Set
 
@@ -17,12 +17,12 @@ from reportlab.lib.enums import TA_CENTER
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
 AIRTABLE_BASE_ID = os.environ["AIRTABLE_BASE_ID"]
 
-# Try partner tables (comma-separated). Fallback to TRANSCRIPT_TABLE or "Students 1221".
+# Partner tables (comma-separated). Fallback to TRANSCRIPT_TABLE or "Students 1221".
 TRANSCRIPT_TABLES_ENV = os.environ.get("TRANSCRIPT_TABLES", "")
 TRANSCRIPT_TABLE_FALLBACK = os.environ.get("TRANSCRIPT_TABLE", "Students 1221")
 
-# Accept RECORD_IDS (comma-separated) or single RECORD_ID (or argv[1])
-RECORD_IDS_ENV = os.getenv("RECORD_IDS", "").strip()
+# Accept RECORD_IDS (comma) or single RECORD_ID (or argv[1])
+RECORD_IDS_ENV   = os.getenv("RECORD_IDS", "").strip()
 RECORD_ID_SINGLE = os.getenv("RECORD_ID") or (sys.argv[1] if len(sys.argv) > 1 else "")
 
 # 0 (default): only explicit record IDs. 1: merge rows by student name across all tables.
@@ -41,22 +41,33 @@ SIGNATURE_PATH = os.environ.get("SIGNATURE_PATH", "signature_principal.png")
 PRINCIPAL      = os.environ.get("PRINCIPAL_NAME", "Ursula Derios")
 SIGN_DATEFMT   = os.environ.get("SIGN_DATE_FMT", "%B %d, %Y")
 
-# ---- LOG TABLE (literal table name is "TRANSCRIPT_LOG_TABLE") ----
+# ========= LOG TABLE (literal table name is "TRANSCRIPT_LOG_TABLE") =========
 TRANSCRIPT_LOG_TABLE = os.environ.get("TRANSCRIPT_LOG_TABLE", "TRANSCRIPT_LOG_TABLE")
 
-# Airtable fields
+# Map your log table column names (override in workflow env if they differ)
+LOG_FIELD_STUDENT_NAME      = os.environ.get("LOG_FIELD_STUDENT_NAME",      "Student Name")
+LOG_FIELD_STUDENT_ID        = os.environ.get("LOG_FIELD_STUDENT_ID",        "Student Canvas ID")
+LOG_FIELD_SCHOOL_YEAR       = os.environ.get("LOG_FIELD_SCHOOL_YEAR",       "School Year")
+LOG_FIELD_GRADE_LEVEL       = os.environ.get("LOG_FIELD_GRADE_LEVEL",       "Grade Level")
+LOG_FIELD_RUN_AT            = os.environ.get("LOG_FIELD_RUN_AT",            "Transcript Run At (ISO)")
+LOG_FIELD_COURSES_TEXT      = os.environ.get("LOG_FIELD_COURSES_TEXT",      "Course List (text)")
+LOG_FIELD_SOURCE_IDS        = os.environ.get("LOG_FIELD_SOURCE_IDS",        "Source Record IDs (csv)")
+LOG_FIELD_PDF_ATTACHMENT    = os.environ.get("LOG_FIELD_PDF_ATTACHMENT",    "Transcript PDF")  # Attachment field
+
+# ========= AIRTABLE FIELDS =========
 F = {
     "student_name": "Student Name",
     "student_id": "Student Canvas ID",
     "grade_select": "Grade Select",
     "school_year": "School Year",
 
+    # course details
     "course_name": "Course Name",
     "course_code": "Course Code",              # -> Course Number
     "assigned_teachers": "Assigned Teachers",  # -> Teacher (first)
-
     "letter": "Grade Letter",                  # -> S1/S2
 
+    # rollups (fallbacks)
     "course_name_rollup": "Course Name Rollup (from Southlands Courses Enrollment 3)",
     "course_code_rollup": "Course Code Rollup (from Southlands Courses Enrollment 3)",
 }
@@ -232,7 +243,7 @@ def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
 
     return rows
 
-# ---- summarize & log to Airtable (with direct attachment upload) ----
+# ---- summarize courses for logging ----
 def summarize_courses(rows: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for r in rows:
@@ -244,29 +255,34 @@ def summarize_courses(rows: List[Dict[str, Any]]) -> str:
             lines.append(f"{nm} — {cd}" if cd else nm)
     return "\n".join(lines) if lines else ""
 
+# ---- DIRECT ATTACHMENT UPLOAD TO AIRTABLE ----
 def upload_attachment_to_airtable(file_path: pathlib.Path) -> Dict[str, Any]:
     """
-    Uploads the local file to Airtable's attachment service and returns the attachment object.
-    Requires AIRTABLE_API_KEY. Uses official content endpoint.
+    Upload local PDF to Airtable's attachment service and return an attachment object.
+    IMPORTANT: requires 'X-Airtable-Application-Id' header (your BASE ID) or you'll get 404.
     """
     url = "https://content.airtable.com/v0/attachments"
-    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "X-Airtable-Application-Id": AIRTABLE_BASE_ID,
+    }
     with open(file_path, "rb") as f:
         files = {"file": (file_path.name, f, "application/pdf")}
         resp = requests.post(url, headers=headers, files=files, timeout=60)
+
     if resp.status_code >= 300:
         raise RuntimeError(f"Attachment upload failed ({resp.status_code}): {resp.text}")
+
     data = resp.json()
-    # Response is a dict with 'id', 'url', 'filename', etc., or sometimes a list.
     if isinstance(data, dict) and data.get("id"):
         return data
     if isinstance(data, dict) and data.get("attachments"):
-        att = data["attachments"][0]
-        return att
+        return data["attachments"][0]
     if isinstance(data, list) and data and isinstance(data[0], dict):
         return data[0]
     raise RuntimeError(f"Unexpected attachment response: {resp.text}")
 
+# ---- LOG ONE ROW INTO YOUR TRANSCRIPT_LOG_TABLE ----
 def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     try:
         tlog = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_LOG_TABLE)
@@ -280,21 +296,23 @@ def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows:
     year         = sget(header_fields, F["school_year"])
     run_at_iso   = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     courses_text = summarize_courses(rows)
+    source_ids   = ",".join({ r.get("id","") for r in rows if r.get("id") })
 
-    payload = {
-        "Student Name": student_name,
-        "Student Canvas ID": student_id,
-        "School Year": year,
-        "Grade Level": grade,
-        "Transcript Run At (ISO)": run_at_iso,
-        "Course List (text)": courses_text,
-        "Source Record IDs (csv)": ",".join({ r.get("id","") for r in rows if r.get("id") }),
-    }
+    # Build payload only using the column names you configured (non-empty)
+    payload = {}
+    if LOG_FIELD_STUDENT_NAME:   payload[LOG_FIELD_STUDENT_NAME]   = student_name
+    if LOG_FIELD_STUDENT_ID:     payload[LOG_FIELD_STUDENT_ID]     = student_id
+    if LOG_FIELD_SCHOOL_YEAR:    payload[LOG_FIELD_SCHOOL_YEAR]    = year
+    if LOG_FIELD_GRADE_LEVEL:    payload[LOG_FIELD_GRADE_LEVEL]    = grade
+    if LOG_FIELD_RUN_AT:         payload[LOG_FIELD_RUN_AT]         = run_at_iso
+    if LOG_FIELD_COURSES_TEXT:   payload[LOG_FIELD_COURSES_TEXT]   = courses_text
+    if LOG_FIELD_SOURCE_IDS:     payload[LOG_FIELD_SOURCE_IDS]     = source_ids
 
-    # Upload the actual PDF to Airtable and attach it
+    # Upload the PDF and attach it
     try:
         attachment_obj = upload_attachment_to_airtable(pdf_path)
-        payload["Transcript PDF"] = [attachment_obj]
+        if LOG_FIELD_PDF_ATTACHMENT:
+            payload[LOG_FIELD_PDF_ATTACHMENT] = [attachment_obj]
     except Exception as e:
         print(f"[WARN] PDF attachment upload failed: {e}")
 
@@ -398,8 +416,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         clean = [["(no courses found)", "", "", "", ""]]
     table_data.extend(clean)
 
-    Wc = W
-    cw = [0.46*Wc, 0.18*Wc, 0.22*Wc, 0.07*Wc, 0.07*Wc]
+    cw = [0.46*W, 0.18*W, 0.22*W, 0.07*W, 0.07*W]
     courses = PdfTable(table_data, colWidths=cw, repeatRows=1)
     courses.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), ACCENT),
