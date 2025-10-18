@@ -1,4 +1,4 @@
-import os, sys, pathlib
+import os, sys, pathlib, re
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Set
 
@@ -16,9 +16,11 @@ from reportlab.lib.enums import TA_CENTER
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
 AIRTABLE_BASE_ID = os.environ["AIRTABLE_BASE_ID"]
 
+# Try all partner tables, comma-separated. Fallback to TRANSCRIPT_TABLE or "Students 1221".
 TRANSCRIPT_TABLES_ENV = os.environ.get("TRANSCRIPT_TABLES", "")
 TRANSCRIPT_TABLE_FALLBACK = os.environ.get("TRANSCRIPT_TABLE", "Students 1221")
 
+# Accept RECORD_IDS (comma-separated) or single RECORD_ID (or argv[1])
 RECORD_IDS_ENV = os.getenv("RECORD_IDS", "").strip()
 RECORD_ID_SINGLE = os.getenv("RECORD_ID") or (sys.argv[1] if len(sys.argv) > 1 else "")
 
@@ -44,13 +46,13 @@ F = {
 
     # direct course fields
     "course_name": "Course Name",
-    "course_code": "Course Code",
-    "assigned_teachers": "Assigned Teachers",
+    "course_code": "Course Code",              # -> Course Number
+    "assigned_teachers": "Assigned Teachers",  # -> Teacher (first)
 
     # grades
-    "letter": "Grade Letter",
+    "letter": "Grade Letter",                  # -> S1/S2 grade value
 
-    # rollups (fallbacks)
+    # rollups (fallbacks only)
     "course_name_rollup": "Course Name Rollup (from Southlands Courses Enrollment 3)",
     "course_code_rollup": "Course Code Rollup (from Southlands Courses Enrollment 3)",
 }
@@ -111,7 +113,6 @@ def get_rec_and_table(record_id: str):
     raise SystemExit(f"[ERROR] Record {record_id} not found in any configured tables. Last error: {last_err}")
 
 def fetch_rows_for_name_across_all_tables(student_name: str) -> List[Dict[str, Any]]:
-    """Search EVERY partner table for rows where Student Name == student_name."""
     merged: List[Dict[str, Any]] = []
     for tname in table_names():
         try:
@@ -175,6 +176,18 @@ class ShiftedImage(Flowable):
         self.canv.drawImage(self.img, 0, 0, width=self.w, height=self.h, mask='auto')
         self.canv.restoreState()
 
+def safe_filename(raw: str) -> str:
+    """
+    Windows/ZIP-safe filename:
+    - collapse whitespace to underscores
+    - remove commas and any non [A-Za-z0-9._-]
+    - trim leading/trailing underscores
+    """
+    s = re.sub(r"\s+", "_", raw or "")
+    s = s.replace(",", "_")
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
+    return s.strip("_") or "file"
+
 # ========= PDF =========
 def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     student_name = sget(student_fields, F["student_name"]).strip()
@@ -183,8 +196,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     year         = sget(student_fields, F["school_year"])
 
     out = pathlib.Path("output"); out.mkdir(parents=True, exist_ok=True)
-    safe_name = student_name.replace(" ", "_").replace(",", "")
-    pdf_path = out / f"transcript_{safe_name}_{year}.pdf"
+    pdf_path = out / f"transcript_{safe_filename(student_name)}_{safe_filename(year)}.pdf"
 
     doc = SimpleDocTemplate(
         str(pdf_path),
@@ -204,7 +216,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
     story: List[Any] = []
 
-    # header strip (student info + address)
+    # ===== Header strip =====
     left_data = [
         [Paragraph("<b>Student Info</b>", styles["rc_bold"]), ""],
         ["Name", Paragraph(student_name, styles["rc_body"])],
@@ -241,7 +253,6 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
     header_row = PdfTable([[left_tbl, "", right_tbl]],
                           colWidths=[W*0.40, TOP_GUTTER_PTS, W*0.60 - TOP_GUTTER_PTS])
-    header_row.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP")]))
     story.append(header_row)
     story.append(Spacer(1, 6))
 
@@ -254,19 +265,18 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(Paragraph(f"For School Year {year}", styles["rc_h2"]))
     story.append(Spacer(1, 8))
 
-    # ====== build course rows (merged from all tables) ======
+    # ===== Courses (merged across all tables) =====
     table_data = [["Course Name", "Course Number", "Teacher", "S1", "S2"]]
     expanded: List[List[str]] = []
+
     for r in rows:
         f = r.get("fields", {})
 
         names = listify(f.get(F["course_name"])) or listify(f.get(F["course_name_rollup"]))
         codes = listify(f.get(F["course_code"])) or listify(f.get(F["course_code_rollup"]))
-        teachers = listify(f.get(F["assigned_teachers"]))  # list from Assigned Teachers
+        teachers = listify(f.get(F["assigned_teachers"]))  # first teacher shown
+        grade_v = sget(f, F["letter"])  # S1/S2 grade
 
-        grade_v = sget(f, F["letter"])  # course grade for S1/S2
-
-        # pick a single teacher per row (first unique)
         fallback_teacher = ""
         if teachers:
             uniq = list(dict.fromkeys([t for t in teachers if t.strip()]))
@@ -291,7 +301,6 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         if t not in seen and any(x.strip() for x in row):
             seen.add(t); clean.append(row)
     clean.sort(key=lambda x: (x[0].lower(), x[1].lower()))
-
     if not clean:
         clean = [["(no courses found)", "", "", "", ""]]
     table_data.extend(clean)
@@ -317,7 +326,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(courses)
     story.append(Spacer(1, 10))
 
-    # signature stack
+    # ===== Signature stack =====
     sig_col_w = W * 0.38
     if pathlib.Path(SIGNATURE_PATH).exists():
         sig_img = ShiftedImage(SIGNATURE_PATH, max_w=SIG_IMG_MAX_W, max_h=SIG_IMG_MAX_H, dx=SIG_IMG_SHIFT)
@@ -348,14 +357,14 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
 # ========= main =========
 def main():
-    # Which record IDs?
+    # gather ids
     ids: List[str] = []
     if RECORD_IDS_ENV:
         ids.extend([x.strip() for x in RECORD_IDS_ENV.split(",") if x.strip()])
     elif RECORD_ID_SINGLE:
         ids.append(RECORD_ID_SINGLE.strip())
 
-    # resolve distinct student names from provided IDs
+    # resolve distinct student names -> header fields
     name_to_first_fields: Dict[str, Dict[str, Any]] = {}
     for rid in ids:
         try:
@@ -366,7 +375,6 @@ def main():
             if not name:
                 print(f"[WARN] '{F['student_name']}' empty for {rid}; skipping.")
                 continue
-            # keep the first fields seen for that name to render header (ID/year, etc.)
             if name not in name_to_first_fields:
                 name_to_first_fields[name] = fields
         except SystemExit as e:
@@ -377,11 +385,11 @@ def main():
     if not name_to_first_fields:
         sys.exit("[ERROR] No usable records resolved from the provided IDs.")
 
-    # for each distinct student name, gather rows across ALL tables and create ONE transcript
+    # build one transcript per distinct student name, merging rows from ALL tables
     for student_name, header_fields in name_to_first_fields.items():
         rows = fetch_rows_for_name_across_all_tables(student_name)
         if not rows:
-            print(f"[WARN] No rows found across tables for {student_name}; using header record only.")
+            print(f"[WARN] No rows across tables for {student_name}; using header only.")
             rows = [{"fields": header_fields}]
         build_pdf(header_fields, rows)
 
