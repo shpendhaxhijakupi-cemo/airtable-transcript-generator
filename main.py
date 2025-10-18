@@ -10,7 +10,7 @@ from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table as PdfTable, TableStyle, Image, Flowable
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
 # ========= ENV =========
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
@@ -31,7 +31,7 @@ RECORD_ID = os.getenv("RECORD_ID") or (sys.argv[1] if len(sys.argv) > 1 else Non
 if not RECORD_ID:
     sys.exit("[ERROR] Missing RECORD_ID")
 
-# ========= AIRTABLE FIELDS =========
+# Airtable fields
 F = {
     "student_name": "Students Name",
     "student_id": "Student Canvas ID",
@@ -51,9 +51,10 @@ BORDER_GRAY = colors.HexColor("#D0D7DE")
 INK         = colors.HexColor("#0F172A")
 ACCENT      = colors.HexColor("#0C4A6E")
 
-# ===== Controls you can tweak later (kept neutral now) =====
-TOP_GUTTER_PTS = 20       # separation between Student Info and School block (0 keeps current look)
-SIG_LEFTPAD    = 10       # horizontal nudge (in points) inside the signature cell; >0 moves right
+# ========= TWEAK KNOBS (all 0 = current look unchanged) =========
+TOP_GUTTER_PTS = 0   # separation between top-left Student Info and top-right School block
+SIG_LEFTPAD    = 0   # nudge the entire signature stack (image+line+text) to the right
+SIG_IMG_SHIFT  = 0   # nudge ONLY the signature image (pts). + right, - left
 
 api = Api(AIRTABLE_API_KEY)
 table = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_TABLE)
@@ -83,7 +84,7 @@ def detect_semester(name: str, code: str) -> Tuple[bool, bool]:
     return (is_a and not is_b, is_b and not is_a)
 
 class CenterLine(Flowable):
-    def __init__(self, width=220, thickness=0.9):
+    def __init__(self, width=220, thickness=0.8):
         super().__init__()
         self.width, self.thickness = width, thickness
         self.height = 3
@@ -101,7 +102,6 @@ def draw_page_border(canv: canvas.Canvas, doc):
     canv.restoreState()
 
 def fit_image(path: str, max_w: float, max_h: float) -> Image:
-    """Load image and keep aspect ratio within max_w x max_h."""
     img = Image(path)
     iw, ih = img.imageWidth, img.imageHeight
     if iw == 0 or ih == 0:
@@ -129,12 +129,13 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     W = doc.width
 
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle("rc_tiny",  fontName="Helvetica",      fontSize=8.5,  textColor=INK, leading=10))
-    styles.add(ParagraphStyle("rc_small", fontName="Helvetica",      fontSize=9.5,  textColor=INK, leading=11))
-    styles.add(ParagraphStyle("rc_body",  fontName="Helvetica",      fontSize=10.5, textColor=INK, leading=13))
-    styles.add(ParagraphStyle("rc_bold",  parent=styles["rc_body"],  fontName="Helvetica-Bold"))
-    styles.add(ParagraphStyle("rc_h1",    fontName="Helvetica-Bold", fontSize=16,   textColor=INK, alignment=TA_CENTER, leading=18))
-    styles.add(ParagraphStyle("rc_h2",    fontName="Helvetica-Bold", fontSize=12,   textColor=INK, alignment=TA_CENTER, leading=14))
+    # ---- unique style names to avoid collisions ----
+    styles.add(ParagraphStyle("rc_tiny",  fontName="Helvetica",       fontSize=8.5,  textColor=INK, leading=10))
+    styles.add(ParagraphStyle("rc_small", fontName="Helvetica",       fontSize=9.5,  textColor=INK, leading=11))
+    styles.add(ParagraphStyle("rc_body",  fontName="Helvetica",       fontSize=10.5, textColor=INK, leading=13))
+    styles.add(ParagraphStyle("rc_bold",  parent=styles["rc_body"],   fontName="Helvetica-Bold"))
+    styles.add(ParagraphStyle("rc_h1",    fontName="Helvetica-Bold",  fontSize=16,   textColor=INK, alignment=TA_CENTER, leading=18))
+    styles.add(ParagraphStyle("rc_h2",    fontName="Helvetica-Bold",  fontSize=12,   textColor=INK, alignment=TA_CENTER, leading=14))
 
     story: List[Any] = []
 
@@ -252,28 +253,51 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(Spacer(1, 10))
 
     # ======= Signature block (right-aligned) =======
-    sig_cells: List[Any] = []
+    sig_col_w = W * 0.38
+
+    # Image row: shift only the image using a nested 1-cell table with padding
     if pathlib.Path(SIGNATURE_PATH).exists():
-        sig_cells.append(fit_image(SIGNATURE_PATH, max_w=160, max_h=50))
-        sig_cells.append(Spacer(1, 3))
+        sig_img = fit_image(SIGNATURE_PATH, max_w=160, max_h=50)
+        img_tbl = PdfTable([[sig_img]], colWidths=[sig_col_w])
+        img_tbl.setStyle(TableStyle([
+            ("ALIGN", (0,0), (-1,-1), "LEFT"),
+            ("LEFTPADDING",  (0,0), (-1,-1), max(0, SIG_IMG_SHIFT)),   # move right
+            ("RIGHTPADDING", (0,0), (-1,-1), max(0, -SIG_IMG_SHIFT)), # move left if negative
+            ("TOPPADDING",   (0,0), (-1,-1), 0),
+            ("BOTTOMPADDING",(0,0), (-1,-1), 0),
+        ]))
+        img_row = [img_tbl]
+    else:
+        img_row = [Spacer(1, 0)]
 
-    sig_cells.append(CenterLine(width=220, thickness=0.9))
-    sig_cells.append(Spacer(1, 4))
-    sig_cells.append(Paragraph(f"Principal - {PRINCIPAL}", styles["rc_body"]))
-    sig_cells.append(Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", styles["rc_small"]))
+    # Keep line + text centered (unaffected by image shift)
+    line_tbl = PdfTable([[CenterLine(width=220, thickness=0.9)]], colWidths=[sig_col_w])
+    line_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
 
-    # Signature table; SIG_LEFTPAD lets you horizontally nudge the whole block later
-    sig = PdfTable([[sig_cells]], colWidths=[W*0.38])
+    principal_tbl = PdfTable([[Paragraph(f"Principal - {PRINCIPAL}", styles["rc_body"])]], colWidths=[sig_col_w])
+    principal_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
+
+    date_tbl = PdfTable([[Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", styles["rc_small"])]], colWidths=[sig_col_w])
+    date_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
+
+    # Vertical stack for the signature column
+    sig_stack = [
+        img_row,
+        [Spacer(1, 3)],
+        [line_tbl],
+        [Spacer(1, 4)],
+        [principal_tbl],
+        [date_tbl],
+    ]
+    sig = PdfTable(sig_stack, colWidths=[sig_col_w])
     sig.setStyle(TableStyle([
-        ("ALIGN", (0,0), (-1,-1), "CENTER"),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-        ("LEFTPADDING", (0,0), (-1,-1), SIG_LEFTPAD),  # nudge right if you set > 0
+        ("LEFTPADDING",  (0,0), (-1,-1), SIG_LEFTPAD),  # optional whole-block nudge
         ("RIGHTPADDING", (0,0), (-1,-1), 0),
-        ("TOPPADDING", (0,0), (-1,-1), 0),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 0),
+        ("TOPPADDING",   (0,0), (-1,-1), 0),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 0),
     ]))
 
-    sig_row = PdfTable([["", sig]], colWidths=[W*0.62, W*0.38])
+    sig_row = PdfTable([["", sig]], colWidths=[W*0.62, sig_col_w])
     sig_row.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "BOTTOM")]))
     story.append(sig_row)
 
