@@ -10,7 +10,7 @@ from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table as PdfTable, TableStyle, Image, Flowable
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER
 
 # ========= ENV =========
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
@@ -31,7 +31,7 @@ RECORD_ID = os.getenv("RECORD_ID") or (sys.argv[1] if len(sys.argv) > 1 else Non
 if not RECORD_ID:
     sys.exit("[ERROR] Missing RECORD_ID")
 
-# Airtable fields
+# ========= AIRTABLE FIELDS =========
 F = {
     "student_name": "Students Name",
     "student_id": "Student Canvas ID",
@@ -50,6 +50,10 @@ ROW_ALT     = colors.HexColor("#FBFCFD")
 BORDER_GRAY = colors.HexColor("#D0D7DE")
 INK         = colors.HexColor("#0F172A")
 ACCENT      = colors.HexColor("#0C4A6E")
+
+# ===== Controls you can tweak later (kept neutral now) =====
+TOP_GUTTER_PTS = 0       # separation between Student Info and School block (0 keeps current look)
+SIG_LEFTPAD    = 0       # horizontal nudge (in points) inside the signature cell; >0 moves right
 
 api = Api(AIRTABLE_API_KEY)
 table = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_TABLE)
@@ -79,7 +83,7 @@ def detect_semester(name: str, code: str) -> Tuple[bool, bool]:
     return (is_a and not is_b, is_b and not is_a)
 
 class CenterLine(Flowable):
-    def __init__(self, width=220, thickness=0.8):
+    def __init__(self, width=220, thickness=0.9):
         super().__init__()
         self.width, self.thickness = width, thickness
         self.height = 3
@@ -97,6 +101,7 @@ def draw_page_border(canv: canvas.Canvas, doc):
     canv.restoreState()
 
 def fit_image(path: str, max_w: float, max_h: float) -> Image:
+    """Load image and keep aspect ratio within max_w x max_h."""
     img = Image(path)
     iw, ih = img.imageWidth, img.imageHeight
     if iw == 0 or ih == 0:
@@ -124,17 +129,16 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     W = doc.width
 
     styles = getSampleStyleSheet()
-    # ---- unique style names to avoid collisions ----
-    styles.add(ParagraphStyle("rc_tiny",  fontName="Helvetica",       fontSize=8.5,  textColor=INK, leading=10))
-    styles.add(ParagraphStyle("rc_small", fontName="Helvetica",       fontSize=9.5,  textColor=INK, leading=11))
-    styles.add(ParagraphStyle("rc_body",  fontName="Helvetica",       fontSize=10.5, textColor=INK, leading=13))
-    styles.add(ParagraphStyle("rc_bold",  parent=styles["rc_body"],   fontName="Helvetica-Bold"))
-    styles.add(ParagraphStyle("rc_h1",    fontName="Helvetica-Bold",  fontSize=16,   textColor=INK, alignment=TA_CENTER, leading=18))
-    styles.add(ParagraphStyle("rc_h2",    fontName="Helvetica-Bold",  fontSize=12,   textColor=INK, alignment=TA_CENTER, leading=14))
+    styles.add(ParagraphStyle("rc_tiny",  fontName="Helvetica",      fontSize=8.5,  textColor=INK, leading=10))
+    styles.add(ParagraphStyle("rc_small", fontName="Helvetica",      fontSize=9.5,  textColor=INK, leading=11))
+    styles.add(ParagraphStyle("rc_body",  fontName="Helvetica",      fontSize=10.5, textColor=INK, leading=13))
+    styles.add(ParagraphStyle("rc_bold",  parent=styles["rc_body"],  fontName="Helvetica-Bold"))
+    styles.add(ParagraphStyle("rc_h1",    fontName="Helvetica-Bold", fontSize=16,   textColor=INK, alignment=TA_CENTER, leading=18))
+    styles.add(ParagraphStyle("rc_h2",    fontName="Helvetica-Bold", fontSize=12,   textColor=INK, alignment=TA_CENTER, leading=14))
 
     story: List[Any] = []
 
-    # ======= TOP STRIP: Student Info (left) + School Header (right) =======
+    # ======= TOP STRIP: Student Info (left) + (optional) gutter + School Header (right) =======
     left_data = [
         [Paragraph("<b>Student Info</b>", styles["rc_bold"]), ""],
         ["Name", Paragraph(student_name, styles["rc_body"])],
@@ -171,10 +175,15 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         ("BOTTOMPADDING", (0,0), (-1,-1), 0),
     ]))
 
-    header_row = PdfTable([[left_tbl, right_tbl]], colWidths=[W*0.40, W*0.60])
+    # 3-column header; TOP_GUTTER_PTS = 0 keeps same visual today
+    header_row = PdfTable(
+        [[left_tbl, "", right_tbl]],
+        colWidths=[W*0.40, TOP_GUTTER_PTS, W*0.60 - TOP_GUTTER_PTS]
+    )
     header_row.setStyle(TableStyle([
         ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ("LINEBEFORE", (1,0), (1,0), 0, colors.white),
+        ("LEFTPADDING",  (1,0), (1,0), 0),
+        ("RIGHTPADDING", (1,0), (1,0), 0),
     ]))
     story.append(header_row)
     story.append(Spacer(1, 6))
@@ -246,18 +255,19 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     sig_cells: List[Any] = []
     if pathlib.Path(SIGNATURE_PATH).exists():
         sig_cells.append(fit_image(SIGNATURE_PATH, max_w=160, max_h=50))
-        sig_cells.append(Spacer(1, 2))
+        sig_cells.append(Spacer(1, 3))
 
     sig_cells.append(CenterLine(width=220, thickness=0.9))
-    sig_cells.append(Spacer(1, 3))
+    sig_cells.append(Spacer(1, 4))
     sig_cells.append(Paragraph(f"Principal - {PRINCIPAL}", styles["rc_body"]))
     sig_cells.append(Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", styles["rc_small"]))
 
+    # Signature table; SIG_LEFTPAD lets you horizontally nudge the whole block later
     sig = PdfTable([[sig_cells]], colWidths=[W*0.38])
     sig.setStyle(TableStyle([
         ("ALIGN", (0,0), (-1,-1), "CENTER"),
         ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-        ("LEFTPADDING", (0,0), (-1,-1), 0),
+        ("LEFTPADDING", (0,0), (-1,-1), SIG_LEFTPAD),  # nudge right if you set > 0
         ("RIGHTPADDING", (0,0), (-1,-1), 0),
         ("TOPPADDING", (0,0), (-1,-1), 0),
         ("BOTTOMPADDING", (0,0), (-1,-1), 0),
