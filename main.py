@@ -10,7 +10,7 @@ from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table as PdfTable, TableStyle, Image, Flowable
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER
 
 # ========= ENV =========
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
@@ -31,7 +31,7 @@ RECORD_ID = os.getenv("RECORD_ID") or (sys.argv[1] if len(sys.argv) > 1 else Non
 if not RECORD_ID:
     sys.exit("[ERROR] Missing RECORD_ID")
 
-# Airtable fields
+# ========= AIRTABLE FIELDS =========
 F = {
     "student_name": "Students Name",
     "student_id": "Student Canvas ID",
@@ -51,10 +51,16 @@ BORDER_GRAY = colors.HexColor("#D0D7DE")
 INK         = colors.HexColor("#0F172A")
 ACCENT      = colors.HexColor("#0C4A6E")
 
-# ========= TWEAK KNOBS (all 0 = current look unchanged) =========
-TOP_GUTTER_PTS = 200   # separation between top-left Student Info and top-right School block
-SIG_LEFTPAD    = -20   # nudge the entire signature stack (image+line+text) to the right
-SIG_IMG_SHIFT  = -30   # nudge ONLY the signature image (pts). + right, - left
+# ========= TWEAK KNOBS (defaults keep current look) =========
+TOP_GUTTER_PTS   = 0        # separation between Student Info (left) and School block (right)
+LOGO_MAX_W_PCT   = float(os.environ.get("LOGO_MAX_W_PCT", "0.18"))  # % of page text width
+LOGO_MAX_H_PT    = int(os.environ.get("LOGO_MAX_H_PT", "48"))       # points
+LOGO_BOTTOM_SPACE= int(os.environ.get("LOGO_BOTTOM_SPACE", "8"))    # space under logo before title
+
+SIG_LEFTPAD      = 0        # nudge the entire signature stack (image + line + text) to the right
+SIG_IMG_SHIFT    = int(os.environ.get("SIG_IMG_SHIFT", "0"))  # shift ONLY signature image (pts; + right, - left)
+SIG_IMG_MAX_W    = int(os.environ.get("SIG_IMG_MAX_W", "160"))
+SIG_IMG_MAX_H    = int(os.environ.get("SIG_IMG_MAX_H", "50"))
 
 api = Api(AIRTABLE_API_KEY)
 table = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_TABLE)
@@ -84,7 +90,7 @@ def detect_semester(name: str, code: str) -> Tuple[bool, bool]:
     return (is_a and not is_b, is_b and not is_a)
 
 class CenterLine(Flowable):
-    def __init__(self, width=220, thickness=0.8):
+    def __init__(self, width=220, thickness=0.9):
         super().__init__()
         self.width, self.thickness = width, thickness
         self.height = 3
@@ -110,6 +116,30 @@ def fit_image(path: str, max_w: float, max_h: float) -> Image:
     img._restrictSize(int(iw*scale), int(ih*scale))
     return img
 
+# New: Flowable that draws an image and shifts it horizontally by dx points
+class ShiftedImage(Flowable):
+    def __init__(self, path: str, max_w: float, max_h: float, dx: int = 0):
+        super().__init__()
+        from reportlab.lib.utils import ImageReader
+        self.path = path
+        self.dx = dx
+        self.img = ImageReader(path)
+        iw, ih = self.img.getSize()
+        if iw == 0 or ih == 0:
+            iw, ih = max_w, max_h
+        scale = min(max_w/iw, max_h/ih)
+        self.w = iw * scale
+        self.h = ih * scale
+        self.width = self.w
+        self.height = self.h
+    def wrap(self, availW, availH):
+        return (self.w, self.h)
+    def draw(self):
+        self.canv.saveState()
+        self.canv.translate(self.dx, 0)  # shift only the image
+        self.canv.drawImage(self.img, 0, 0, width=self.w, height=self.h, mask='auto')
+        self.canv.restoreState()
+
 # ========= PDF =========
 def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     student_name = sget(student_fields, F["student_name"]).strip()
@@ -129,13 +159,12 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     W = doc.width
 
     styles = getSampleStyleSheet()
-    # ---- unique style names to avoid collisions ----
-    styles.add(ParagraphStyle("rc_tiny",  fontName="Helvetica",       fontSize=8.5,  textColor=INK, leading=10))
-    styles.add(ParagraphStyle("rc_small", fontName="Helvetica",       fontSize=9.5,  textColor=INK, leading=11))
-    styles.add(ParagraphStyle("rc_body",  fontName="Helvetica",       fontSize=10.5, textColor=INK, leading=13))
-    styles.add(ParagraphStyle("rc_bold",  parent=styles["rc_body"],   fontName="Helvetica-Bold"))
-    styles.add(ParagraphStyle("rc_h1",    fontName="Helvetica-Bold",  fontSize=16,   textColor=INK, alignment=TA_CENTER, leading=18))
-    styles.add(ParagraphStyle("rc_h2",    fontName="Helvetica-Bold",  fontSize=12,   textColor=INK, alignment=TA_CENTER, leading=14))
+    styles.add(ParagraphStyle("rc_tiny",  fontName="Helvetica",      fontSize=8.5,  textColor=INK, leading=10))
+    styles.add(ParagraphStyle("rc_small", fontName="Helvetica",      fontSize=9.5,  textColor=INK, leading=11))
+    styles.add(ParagraphStyle("rc_body",  fontName="Helvetica",      fontSize=10.5, textColor=INK, leading=13))
+    styles.add(ParagraphStyle("rc_bold",  parent=styles["rc_body"],  fontName="Helvetica-Bold"))
+    styles.add(ParagraphStyle("rc_h1",    fontName="Helvetica-Bold", fontSize=16,   textColor=INK, alignment=TA_CENTER, leading=18))
+    styles.add(ParagraphStyle("rc_h2",    fontName="Helvetica-Bold", fontSize=12,   textColor=INK, alignment=TA_CENTER, leading=14))
 
     story: List[Any] = []
 
@@ -176,7 +205,6 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         ("BOTTOMPADDING", (0,0), (-1,-1), 0),
     ]))
 
-    # 3-column header; TOP_GUTTER_PTS = 0 keeps same visual today
     header_row = PdfTable(
         [[left_tbl, "", right_tbl]],
         colWidths=[W*0.40, TOP_GUTTER_PTS, W*0.60 - TOP_GUTTER_PTS]
@@ -189,13 +217,14 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(header_row)
     story.append(Spacer(1, 6))
 
-    # ======= Logo centered =======
+    # ======= Logo centered (manual sizing + separation you can control) =======
     if pathlib.Path(LOGO_PATH).exists():
-        logo = fit_image(LOGO_PATH, max_w=W*0.18, max_h=48)
+        max_w = W * LOGO_MAX_W_PCT
+        logo = fit_image(LOGO_PATH, max_w=max_w, max_h=LOGO_MAX_H_PT)
         logo_tbl = PdfTable([[logo]], colWidths=[W])
         logo_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
         story.append(logo_tbl)
-        story.append(Spacer(1, 2))
+        story.append(Spacer(1, LOGO_BOTTOM_SPACE))  # separation before Report Card
 
     # ======= Title & Year =======
     story.append(Paragraph("Report Card", styles["rc_h1"]))
@@ -255,14 +284,14 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     # ======= Signature block (right-aligned) =======
     sig_col_w = W * 0.38
 
-    # Image row: shift only the image using a nested 1-cell table with padding
+    # Image row: ONLY the image shifts by SIG_IMG_SHIFT
     if pathlib.Path(SIGNATURE_PATH).exists():
-        sig_img = fit_image(SIGNATURE_PATH, max_w=160, max_h=50)
+        sig_img = ShiftedImage(SIGNATURE_PATH, max_w=SIG_IMG_MAX_W, max_h=SIG_IMG_MAX_H, dx=SIG_IMG_SHIFT)
         img_tbl = PdfTable([[sig_img]], colWidths=[sig_col_w])
         img_tbl.setStyle(TableStyle([
-            ("ALIGN", (0,0), (-1,-1), "LEFT"),
-            ("LEFTPADDING",  (0,0), (-1,-1), max(0, SIG_IMG_SHIFT)),   # move right
-            ("RIGHTPADDING", (0,0), (-1,-1), max(0, -SIG_IMG_SHIFT)), # move left if negative
+            ("ALIGN", (0,0), (-1,-1), "CENTER"),  # center the image stack; dx will shift it
+            ("LEFTPADDING",  (0,0), (-1,-1), 0),
+            ("RIGHTPADDING", (0,0), (-1,-1), 0),
             ("TOPPADDING",   (0,0), (-1,-1), 0),
             ("BOTTOMPADDING",(0,0), (-1,-1), 0),
         ]))
