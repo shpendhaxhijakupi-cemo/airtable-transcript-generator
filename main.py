@@ -52,8 +52,8 @@ INK         = colors.HexColor("#0F172A")
 ACCENT      = colors.HexColor("#0C4A6E")
 
 # ===== Controls you can tweak later (kept neutral now) =====
-TOP_GUTTER_PTS = 0       # separation between Student Info and School block (0 keeps current look)
-SIG_LEFTPAD    = 0       # horizontal nudge (in points) inside the signature cell; >0 moves right
+TOP_GUTTER_PTS = 20       # separation between Student Info and School block (0 keeps current look)
+SIG_LEFTPAD    = 10       # horizontal nudge (in points) inside the signature cell; >0 moves right
 
 api = Api(AIRTABLE_API_KEY)
 table = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_TABLE)
