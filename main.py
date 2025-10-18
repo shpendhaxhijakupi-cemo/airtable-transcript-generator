@@ -42,6 +42,10 @@ SIGNATURE_PATH = os.environ.get("SIGNATURE_PATH", "signature_principal.png")
 PRINCIPAL      = os.environ.get("PRINCIPAL_NAME", "Ursula Derios")
 SIGN_DATEFMT   = os.environ.get("SIGN_DATE_FMT", "%B %d, %Y")
 
+# ---- NEW: logging table + public url base (for Airtable attachment) ----
+TRANSCRIPT_LOG_TABLE = os.environ.get("TRANSCRIPT_LOG_TABLE", "Transcripts Log")
+PUBLIC_PDF_BASE_URL  = os.environ.get("PUBLIC_PDF_BASE_URL", "").rstrip("/")
+
 # Airtable fields
 F = {
     "student_name": "Student Name",
@@ -91,7 +95,6 @@ def sget(fields: Dict[str, Any], key: str, default: str = "") -> str:
 def listify(v: Any) -> List[str]:
     if v is None: return []
     if isinstance(v, list): return [str(x).strip() for x in v if str(x).strip()]
-    # split on commas for comma-separated entries
     return [p.strip() for p in str(v).split(",") if p.strip()]
 
 def esc(s: str) -> str:
@@ -191,20 +194,13 @@ def safe_filename(raw: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
     return s.strip("_") or "file"
 
-# ---- strict pairing for course rows ----
+# ---- build rows for a single record (strict pairing, no blanks) ----
 def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
-    """
-    Build rows for a single record without creating blanks:
-    - Pair Course Name with Course Code.
-    - Use teacher at same index if available; otherwise first teacher.
-    - Never emit a row when both name and code are empty.
-    """
     names = listify(fields.get(F["course_name"])) or listify(fields.get(F["course_name_rollup"]))
     codes = listify(fields.get(F["course_code"])) or listify(fields.get(F["course_code_rollup"]))
     teachers = listify(fields.get(F["assigned_teachers"]))
     grade_v = sget(fields, F["letter"])
 
-    # Normalize lengths (pairing logic)
     if not names and not codes:
         return []
 
@@ -231,7 +227,6 @@ def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
         tchr = (teachers[i] if i < len(teachers) else first_teacher)
         tchr = tchr.split(",")[0].strip()
 
-        # Skip if both empty (prevents the phantom blank rows)
         if not (nm or cd):
             continue
 
@@ -241,6 +236,53 @@ def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
         rows.append([nm, cd, tchr, s1, s2])
 
     return rows
+
+# ---- NEW: summarize & log to Airtable ----
+def summarize_courses(rows: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for r in rows:
+        f = r.get("fields", {})
+        local = build_course_rows(f)
+        for nm, cd, *_rest in local:
+            if not (nm or cd): 
+                continue
+            lines.append(f"{nm} — {cd}" if cd else nm)
+    return "\n".join(lines) if lines else ""
+
+def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
+    try:
+        tlog = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_LOG_TABLE)
+    except Exception as e:
+        print(f"[WARN] Could not open log table '{TRANSCRIPT_LOG_TABLE}': {e}")
+        return
+
+    student_name = sget(header_fields, F["student_name"]).strip()
+    student_id   = sget(header_fields, F["student_id"])
+    grade        = sget(header_fields, F["grade_select"])
+    year         = sget(header_fields, F["school_year"])
+    run_at_iso   = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    courses_text = summarize_courses(rows)
+
+    pdf_url = f"{PUBLIC_PDF_BASE_URL}/{pdf_path.name}" if PUBLIC_PDF_BASE_URL else ""
+
+    payload = {
+        "Student Name": student_name,
+        "Student Canvas ID": student_id,
+        "School Year": year,
+        "Grade Level": grade,
+        "Transcript Run At (ISO)": run_at_iso,
+        "Course List (text)": courses_text,
+        "Source Record IDs (csv)": ",".join({ r.get("id","") for r in rows if r.get("id") }),
+        "PDF URL": pdf_url,
+    }
+    if pdf_url:
+        payload["Transcript PDF"] = [{"url": pdf_url, "filename": pdf_path.name}]
+
+    try:
+        tlog.create(payload)
+        print(f"[OK] Logged transcript to '{TRANSCRIPT_LOG_TABLE}' ({student_name}, {year})")
+    except Exception as e:
+        print(f"[WARN] Failed to log transcript: {e}")
 
 # ========= PDF =========
 def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
@@ -434,7 +476,9 @@ def main():
         if not rows:
             print(f"[WARN] No rows for {student_name}; using header only.")
             rows = [{"fields": header_fields}]
-        build_pdf(header_fields, rows)
+        pdf_file = build_pdf(header_fields, rows)
+        # NEW: write log row (+ optional attachment) to Airtable
+        log_to_airtable(pdf_file, header_fields, rows)
 
 if __name__ == "__main__":
     main()
