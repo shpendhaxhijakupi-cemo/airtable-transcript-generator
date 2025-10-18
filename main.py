@@ -38,13 +38,16 @@ if not RECORD_ID:
 F = {
     "student_name": "Students Name",
     "student_id": "Student Canvas ID",
-    "grade": "Grade",
+    "grade": "Grade",  # kept for compatibility, but we will display 'letter' in the header
     "school_year": "School Year",
+    # >>> NEW: direct course name field <<<
+    "course_name": "Course Name",
+    # existing rollups (used as fallback only)
     "course_name_rollup": "Course Name Rollup (from Southlands Courses Enrollment 3)",
     "course_code_rollup": "Course Code Rollup (from Southlands Courses Enrollment 3)",
     "teacher": "Teacher",
-    "letter": "Grade Letter",
-    "percent": "% Total",
+    "letter": "Grade Letter",      # will be used for header Grade AND S1/S2 values
+    "percent": "% Total",          # left in case you need it later (no longer used for grades)
 }
 
 # ========= THEME =========
@@ -167,7 +170,8 @@ class ShiftedImage(Flowable):
 def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     student_name = sget(student_fields, F["student_name"]).strip()
     student_id   = sget(student_fields, F["student_id"])
-    grade        = sget(student_fields, F["grade"])
+    # >>> Use Grade Letter for the header Grade <<<
+    grade        = sget(student_fields, F["letter"])
     year         = sget(student_fields, F["school_year"])
 
     out = pathlib.Path("output"); out.mkdir(parents=True, exist_ok=True)
@@ -195,7 +199,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     left_data = [
         [Paragraph("<b>Student Info</b>", styles["rc_bold"]), ""],
         ["Name", Paragraph(student_name, styles["rc_body"])],
-        ["Current Grade Level", Paragraph(str(grade or ""), styles["rc_body"])],
+        ["Current Grade Level", Paragraph(str(grade or ""), styles["rc_body"])],  # shows Grade Letter now
         ["Student ID", Paragraph(str(student_id or ""), styles["rc_body"])],
     ]
     left_tbl = PdfTable(left_data, colWidths=[W*0.12, W*0.28])
@@ -240,7 +244,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(header_row)
     story.append(Spacer(1, 6))
 
-    # ======= Logo centered =======
+    # ======= Logo centered (manual sizing + separation you can control) =======
     if pathlib.Path(LOGO_PATH).exists():
         max_w = W * LOGO_MAX_W_PCT
         logo = fit_image(LOGO_PATH, max_w=max_w, max_h=LOGO_MAX_H_PT)
@@ -261,10 +265,13 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     for r in rows:
         f = r.get("fields", {})
 
-        names    = listify(f.get(F["course_name_rollup"]))
+        # >>> Use direct Course Name first; if empty, fallback to rollup <<<
+        names    = listify(f.get(F["course_name"])) or listify(f.get(F["course_name_rollup"]))
         codes    = listify(f.get(F["course_code_rollup"]))
         teachers = listify(f.get(F["teacher"]))
-        grade_v  = sget(f, F["letter"]) or sget(f, F["percent"])
+
+        # >>> Grades for S1/S2: use Grade Letter only <<<
+        grade_v  = sget(f, F["letter"])
 
         fallback_teacher = ""
         if teachers:
@@ -282,6 +289,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
             s2 = (grade_v or "—") if b else ""
             expanded.append([nm, cd, tchr, s1, s2])
 
+    # tidy/sort
     seen, clean = set(), []
     for row in expanded:
         t = tuple(row)
@@ -358,7 +366,6 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
 # ========= main =========
 def main():
-    # NEW: detect which table contains the record, then use that table for the student group
     table_obj, rec = get_table_and_record(RECORD_ID)
     if not rec or "fields" not in rec:
         sys.exit("[ERROR] Could not fetch record or empty fields.")
