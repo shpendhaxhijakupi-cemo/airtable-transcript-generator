@@ -24,6 +24,11 @@ TRANSCRIPT_TABLE_FALLBACK = os.environ.get("TRANSCRIPT_TABLE", "Students 1221")
 RECORD_IDS_ENV = os.getenv("RECORD_IDS", "").strip()
 RECORD_ID_SINGLE = os.getenv("RECORD_ID") or (sys.argv[1] if len(sys.argv) > 1 else "")
 
+# BEHAVIOR TOGGLES
+# 0 (default): use ONLY explicit record ids you provide
+# 1: merge rows for the student's name across ALL tables (previous behavior)
+INCLUDE_MATCH_BY_NAME = os.getenv("INCLUDE_MATCH_BY_NAME", "0").strip() == "1"
+
 if not RECORD_IDS_ENV and not RECORD_ID_SINGLE:
     sys.exit("[ERROR] Provide at least one record id via RECORD_IDS (comma-separated) or RECORD_ID")
 
@@ -99,16 +104,18 @@ def table_names() -> List[str]:
         names = ["Students 1221"]
     return names
 
+def try_get(table_name: str, record_id: str):
+    t = api.table(AIRTABLE_BASE_ID, table_name)
+    return t, t.get(record_id)
+
 def get_rec_and_table(record_id: str):
     last_err = None
     for tname in table_names():
         try:
-            t = api.table(AIRTABLE_BASE_ID, tname)
-            r = t.get(record_id)
-            print(f"[INFO] Found record {record_id} in table: {tname}")
-            return t, r
+            return try_get(tname, record_id)
         except Exception as e:
             last_err = e
+            # quiet-ish debug:
             print(f"[DEBUG] Not in '{tname}': {e}")
     raise SystemExit(f"[ERROR] Record {record_id} not found in any configured tables. Last error: {last_err}")
 
@@ -177,12 +184,6 @@ class ShiftedImage(Flowable):
         self.canv.restoreState()
 
 def safe_filename(raw: str) -> str:
-    """
-    Windows/ZIP-safe filename:
-    - collapse whitespace to underscores
-    - remove commas and any non [A-Za-z0-9._-]
-    - trim leading/trailing underscores
-    """
     s = re.sub(r"\s+", "_", raw or "")
     s = s.replace(",", "_")
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
@@ -265,7 +266,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(Paragraph(f"For School Year {year}", styles["rc_h2"]))
     story.append(Spacer(1, 8))
 
-    # ===== Courses (merged across all tables) =====
+    # ===== Courses =====
     table_data = [["Course Name", "Course Number", "Teacher", "S1", "S2"]]
     expanded: List[List[str]] = []
 
@@ -274,7 +275,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
         names = listify(f.get(F["course_name"])) or listify(f.get(F["course_name_rollup"]))
         codes = listify(f.get(F["course_code"])) or listify(f.get(F["course_code_rollup"]))
-        teachers = listify(f.get(F["assigned_teachers"]))  # first teacher shown
+        teachers = listify(f.get(F["assigned_teachers"]))
         grade_v = sget(f, F["letter"])  # S1/S2 grade
 
         fallback_teacher = ""
@@ -326,7 +327,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(courses)
     story.append(Spacer(1, 10))
 
-    # ===== Signature stack =====
+    # ===== Signature =====
     sig_col_w = W * 0.38
     if pathlib.Path(SIGNATURE_PATH).exists():
         sig_img = ShiftedImage(SIGNATURE_PATH, max_w=SIG_IMG_MAX_W, max_h=SIG_IMG_MAX_H, dx=SIG_IMG_SHIFT)
@@ -357,39 +358,52 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
 # ========= main =========
 def main():
-    # gather ids
+    # collect ids
     ids: List[str] = []
     if RECORD_IDS_ENV:
         ids.extend([x.strip() for x in RECORD_IDS_ENV.split(",") if x.strip()])
     elif RECORD_ID_SINGLE:
         ids.append(RECORD_ID_SINGLE.strip())
 
-    # resolve distinct student names -> header fields
-    name_to_first_fields: Dict[str, Dict[str, Any]] = {}
+    # resolve records & group by student name
+    name_to_header: Dict[str, Dict[str, Any]] = {}
+    name_to_rows: Dict[str, List[Dict[str, Any]]] = {}
+
     for rid in ids:
         try:
-            _, rec = get_rec_and_table(rid)
+            t, rec = get_rec_and_table(rid)
             fields = rec.get("fields", {})
             raw = fields.get(F["student_name"])
             name = raw[0] if isinstance(raw, list) and raw else str(raw or "")
             if not name:
                 print(f"[WARN] '{F['student_name']}' empty for {rid}; skipping.")
                 continue
-            if name not in name_to_first_fields:
-                name_to_first_fields[name] = fields
+
+            if name not in name_to_header:
+                name_to_header[name] = fields
+
+            if INCLUDE_MATCH_BY_NAME:
+                # (old behavior) pull all rows for this name across all tables
+                rows = fetch_rows_for_name_across_all_tables(name)
+            else:
+                # strict mode: include ONLY the explicit records
+                rows = [rec]
+
+            name_to_rows.setdefault(name, []).extend(rows)
+
         except SystemExit as e:
             print(str(e))
         except Exception as e:
             print(f"[ERROR] Resolving {rid}: {e}")
 
-    if not name_to_first_fields:
+    if not name_to_header:
         sys.exit("[ERROR] No usable records resolved from the provided IDs.")
 
-    # build one transcript per distinct student name, merging rows from ALL tables
-    for student_name, header_fields in name_to_first_fields.items():
-        rows = fetch_rows_for_name_across_all_tables(student_name)
+    # build one transcript per student name
+    for student_name, header_fields in name_to_header.items():
+        rows = name_to_rows.get(student_name, [])
         if not rows:
-            print(f"[WARN] No rows across tables for {student_name}; using header only.")
+            print(f"[WARN] No rows for {student_name}; using header only.")
             rows = [{"fields": header_fields}]
         build_pdf(header_fields, rows)
 
