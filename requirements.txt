@@ -1,5 +1,3 @@
-python-dotenv==1.0.1
 pyairtable>=2.3
 reportlab>=4.0
 requests>=2.31
-
