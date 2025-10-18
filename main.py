@@ -1,6 +1,6 @@
 import os, sys, pathlib
 from datetime import datetime
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Set
 
 from pyairtable import Api
 from reportlab.lib.pagesizes import A4, landscape
@@ -16,11 +16,9 @@ from reportlab.lib.enums import TA_CENTER
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
 AIRTABLE_BASE_ID = os.environ["AIRTABLE_BASE_ID"]
 
-# NEW: list of partner tables to try (comma-separated). Falls back to TRANSCRIPT_TABLE or "Students 1221".
 TRANSCRIPT_TABLES_ENV = os.environ.get("TRANSCRIPT_TABLES", "")
 TRANSCRIPT_TABLE_FALLBACK = os.environ.get("TRANSCRIPT_TABLE", "Students 1221")
 
-# Allow multiple IDs via env RECORD_IDS (comma-separated). Fallback to single RECORD_ID.
 RECORD_IDS_ENV = os.getenv("RECORD_IDS", "").strip()
 RECORD_ID_SINGLE = os.getenv("RECORD_ID") or (sys.argv[1] if len(sys.argv) > 1 else "")
 
@@ -37,23 +35,22 @@ SIGNATURE_PATH = os.environ.get("SIGNATURE_PATH", "signature_principal.png")
 PRINCIPAL      = os.environ.get("PRINCIPAL_NAME", "Ursula Derios")
 SIGN_DATEFMT   = os.environ.get("SIGN_DATE_FMT", "%B %d, %Y")
 
-# Airtable fields (UPDATED)
+# Airtable fields
 F = {
     "student_name": "Student Name",
     "student_id": "Student Canvas ID",
-    "grade_select": "Grade Select",          # header grade
+    "grade_select": "Grade Select",
     "school_year": "School Year",
 
-    # direct fields for courses
+    # direct course fields
     "course_name": "Course Name",
-    "course_code": "Course Code",            # <-- Course Number now uses this
-    "assigned_teachers": "Assigned Teachers",# <-- Teacher now uses this (list)
+    "course_code": "Course Code",
+    "assigned_teachers": "Assigned Teachers",
 
     # grades
-    "letter": "Grade Letter",                # S1/S2 course grade
-    "percent": "% Total",
+    "letter": "Grade Letter",
 
-    # rollups (fallback only if missing direct fields)
+    # rollups (fallbacks)
     "course_name_rollup": "Course Name Rollup (from Southlands Courses Enrollment 3)",
     "course_code_rollup": "Course Code Rollup (from Southlands Courses Enrollment 3)",
 }
@@ -65,13 +62,12 @@ BORDER_GRAY = colors.HexColor("#D0D7DE")
 INK         = colors.HexColor("#0F172A")
 ACCENT      = colors.HexColor("#0C4A6E")
 
-# ========= TWEAK KNOBS =========
+# ========= TWEAKS =========
 TOP_GUTTER_PTS   = 200
 LOGO_MAX_W_PCT   = float(os.environ.get("LOGO_MAX_W_PCT", "0.30"))
 LOGO_MAX_H_PT    = int(os.environ.get("LOGO_MAX_H_PT", "72"))
 LOGO_BOTTOM_SPACE= int(os.environ.get("LOGO_BOTTOM_SPACE", "15"))
 
-SIG_LEFTPAD      = 0
 SIG_IMG_SHIFT    = int(os.environ.get("SIG_IMG_SHIFT", "-90"))
 SIG_IMG_MAX_W    = int(os.environ.get("SIG_IMG_MAX_W", "160"))
 SIG_IMG_MAX_H    = int(os.environ.get("SIG_IMG_MAX_H", "50"))
@@ -90,33 +86,44 @@ def listify(v: Any) -> List[str]:
     if isinstance(v, list): return [str(x).strip() for x in v if str(x).strip()]
     return [p.strip() for p in str(v).split(",") if p.strip()]
 
-def esc(s: str) -> str: return (s or "").replace('"', '\\"')
+def esc(s: str) -> str:
+    return (s or "").replace('"', '\\"')
 
-def _table_names_to_try() -> List[str]:
+def table_names() -> List[str]:
     names = [t.strip() for t in TRANSCRIPT_TABLES_ENV.split(",") if t.strip()]
-    if not names:
-        names = [t.strip() for t in [TRANSCRIPT_TABLE_FALLBACK] if t.strip()]
+    if not names and TRANSCRIPT_TABLE_FALLBACK.strip():
+        names = [TRANSCRIPT_TABLE_FALLBACK.strip()]
     if not names:
         names = ["Students 1221"]
     return names
 
-def get_table_and_record(record_id: str):
-    """Try each partner table until the record is found. Return (table_obj, record)."""
+def get_rec_and_table(record_id: str):
     last_err = None
-    for tbl_name in _table_names_to_try():
+    for tname in table_names():
         try:
-            tbl = api.table(AIRTABLE_BASE_ID, tbl_name)
-            rec = tbl.get(record_id)
-            print(f"[INFO] Found record in table: {tbl_name}")
-            return tbl, rec
+            t = api.table(AIRTABLE_BASE_ID, tname)
+            r = t.get(record_id)
+            print(f"[INFO] Found record {record_id} in table: {tname}")
+            return t, r
         except Exception as e:
             last_err = e
-            print(f"[DEBUG] Not in '{tbl_name}': {e}")
+            print(f"[DEBUG] Not in '{tname}': {e}")
     raise SystemExit(f"[ERROR] Record {record_id} not found in any configured tables. Last error: {last_err}")
 
-def fetch_group(student_name: str, tbl) -> List[Dict[str, Any]]:
-    formula = f'{{{F["student_name"]}}} = "{esc(student_name)}"'
-    return tbl.all(formula=formula)
+def fetch_rows_for_name_across_all_tables(student_name: str) -> List[Dict[str, Any]]:
+    """Search EVERY partner table for rows where Student Name == student_name."""
+    merged: List[Dict[str, Any]] = []
+    for tname in table_names():
+        try:
+            tbl = api.table(AIRTABLE_BASE_ID, tname)
+            formula = f'{{{F["student_name"]}}} = "{esc(student_name)}"'
+            rows = tbl.all(formula=formula)
+            if rows:
+                print(f"[INFO] +{len(rows)} rows from '{tname}' for {student_name}")
+                merged.extend(rows)
+        except Exception as e:
+            print(f"[WARN] Could not query '{tname}': {e}")
+    return merged
 
 def detect_semester(name: str, code: str) -> Tuple[bool, bool]:
     t = f"{name} {code}".lower()
@@ -155,19 +162,13 @@ class ShiftedImage(Flowable):
     def __init__(self, path: str, max_w: float, max_h: float, dx: int = 0):
         super().__init__()
         from reportlab.lib.utils import ImageReader
-        self.path = path
         self.dx = dx
         self.img = ImageReader(path)
         iw, ih = self.img.getSize()
-        if iw == 0 or ih == 0:
-            iw, ih = max_w, max_h
-        scale = min(max_w/iw, max_h/ih)
-        self.w = iw * scale
-        self.h = ih * scale
+        scale = min(max_w/iw, max_h/ih) if iw and ih else 1.0
+        self.w, self.h = (iw*scale if iw else max_w), (ih*scale if ih else max_h)
         self.width = self.w
         self.height = self.h
-    def wrap(self, availW, availH):
-        return (self.w, self.h)
     def draw(self):
         self.canv.saveState()
         self.canv.translate(self.dx, 0)
@@ -178,7 +179,7 @@ class ShiftedImage(Flowable):
 def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     student_name = sget(student_fields, F["student_name"]).strip()
     student_id   = sget(student_fields, F["student_id"])
-    grade        = sget(student_fields, F["grade_select"])  # header shows Grade Select
+    grade        = sget(student_fields, F["grade_select"])
     year         = sget(student_fields, F["school_year"])
 
     out = pathlib.Path("output"); out.mkdir(parents=True, exist_ok=True)
@@ -203,7 +204,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
     story: List[Any] = []
 
-    # ======= TOP STRIP =======
+    # header strip (student info + address)
     left_data = [
         [Paragraph("<b>Student Info</b>", styles["rc_bold"]), ""],
         ["Name", Paragraph(student_name, styles["rc_body"])],
@@ -215,11 +216,9 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         ("SPAN", (0,0), (1,0)),
         ("BACKGROUND", (0,0), (1,0), GRAY_HEADER),
         ("FONTNAME", (0,0), (1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,-1), 9.5),
-        ("TEXTCOLOR", (0,0), (-1,-1), INK),
-        ("ALIGN", (0,0), (-1,0), "LEFT"),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
         ("GRID", (0,0), (-1,-1), 0.6, BORDER_GRAY),
+        ("FONTSIZE", (0,0), (-1,-1), 9.5),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
         ("LEFTPADDING", (0,0), (-1,-1), 6),
         ("RIGHTPADDING", (0,0), (-1,-1), 6),
         ("TOPPADDING", (0,0), (-1,-1), 6),
@@ -241,45 +240,33 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     ]))
 
     header_row = PdfTable([[left_tbl, "", right_tbl]],
-                          colWidths=[W*0.40, 200, W*0.60 - 200])
-    header_row.setStyle(TableStyle([
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ("LEFTPADDING",  (1,0), (1,0), 0),
-        ("RIGHTPADDING", (1,0), (1,0), 0),
-    ]))
+                          colWidths=[W*0.40, TOP_GUTTER_PTS, W*0.60 - TOP_GUTTER_PTS])
+    header_row.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "TOP")]))
     story.append(header_row)
     story.append(Spacer(1, 6))
 
     if pathlib.Path(LOGO_PATH).exists():
-        max_w = W * float(os.environ.get("LOGO_MAX_W_PCT", "0.30"))
-        logo = fit_image(LOGO_PATH, max_w=max_w, max_h=int(os.environ.get("LOGO_MAX_H_PT", "72")))
-        logo_tbl = PdfTable([[logo]], colWidths=[W])
-        logo_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
-        story.append(logo_tbl)
-        story.append(Spacer(1, int(os.environ.get("LOGO_BOTTOM_SPACE", "15"))))
+        logo = fit_image(LOGO_PATH, max_w=W*LOGO_MAX_W_PCT, max_h=LOGO_MAX_H_PT)
+        story.append(PdfTable([[logo]], colWidths=[W], style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")])))
+        story.append(Spacer(1, LOGO_BOTTOM_SPACE))
 
     story.append(Paragraph("Report Card", styles["rc_h1"]))
     story.append(Paragraph(f"For School Year {year}", styles["rc_h2"]))
     story.append(Spacer(1, 8))
 
-    # ======= Courses table =======
+    # ====== build course rows (merged from all tables) ======
     table_data = [["Course Name", "Course Number", "Teacher", "S1", "S2"]]
     expanded: List[List[str]] = []
-
     for r in rows:
         f = r.get("fields", {})
 
-        # Course name + code with fallback to rollups if blank
         names = listify(f.get(F["course_name"])) or listify(f.get(F["course_name_rollup"]))
         codes = listify(f.get(F["course_code"])) or listify(f.get(F["course_code_rollup"]))
+        teachers = listify(f.get(F["assigned_teachers"]))  # list from Assigned Teachers
 
-        # Teachers from Assigned Teachers (list); fallback to first unique
-        teachers = listify(f.get(F["assigned_teachers"]))
+        grade_v = sget(f, F["letter"])  # course grade for S1/S2
 
-        # Course grade (S1/S2) uses Grade Letter only
-        grade_v = sget(f, F["letter"])
-
-        # fallback teacher
+        # pick a single teacher per row (first unique)
         fallback_teacher = ""
         if teachers:
             uniq = list(dict.fromkeys([t for t in teachers if t.strip()]))
@@ -296,19 +283,20 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
             s2 = (grade_v or "—") if b else ""
             expanded.append([nm, cd, tchr, s1, s2])
 
-    # tidy/sort
-    seen, clean = set(), []
+    # de-dup & sort
+    seen: Set[Tuple[str, str, str, str, str]] = set()
+    clean: List[List[str]] = []
     for row in expanded:
         t = tuple(row)
         if t not in seen and any(x.strip() for x in row):
             seen.add(t); clean.append(row)
     clean.sort(key=lambda x: (x[0].lower(), x[1].lower()))
+
     if not clean:
         clean = [["(no courses found)", "", "", "", ""]]
     table_data.extend(clean)
 
-    Wtbl = doc.width
-    cw = [0.46*Wtbl, 0.18*Wtbl, 0.22*Wtbl, 0.07*Wtbl, 0.07*Wtbl]
+    cw = [0.46*W, 0.18*W, 0.22*W, 0.07*W, 0.07*W]
     courses = PdfTable(table_data, colWidths=cw, repeatRows=1)
     courses.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), ACCENT),
@@ -329,41 +317,29 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(courses)
     story.append(Spacer(1, 10))
 
-    # ======= Signature block (right-aligned) =======
+    # signature stack
     sig_col_w = W * 0.38
-
     if pathlib.Path(SIGNATURE_PATH).exists():
         sig_img = ShiftedImage(SIGNATURE_PATH, max_w=SIG_IMG_MAX_W, max_h=SIG_IMG_MAX_H, dx=SIG_IMG_SHIFT)
-        img_tbl = PdfTable([[sig_img]], colWidths=[sig_col_w])
-        img_tbl.setStyle(TableStyle([
-            ("ALIGN", (0,0), (-1,-1), "CENTER"),
-            ("LEFTPADDING",  (0,0), (-1,-1), 0),
-            ("RIGHTPADDING", (0,0), (-1,-1), 0),
-            ("TOPPADDING",   (0,0), (-1,-1), 0),
-            ("BOTTOMPADDING",(0,0), (-1,-1), 0),
-        ]))
+        img_tbl = PdfTable([[sig_img]], colWidths=[sig_col_w],
+                           style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
         img_row = [img_tbl]
     else:
         img_row = [Spacer(1, 0)]
 
-    line_tbl = PdfTable([[CenterLine(width=220, thickness=0.9)]], colWidths=[sig_col_w])
-    line_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
-    principal_tbl = PdfTable([[Paragraph(f"Principal - {PRINCIPAL}", getSampleStyleSheet()["Normal"])]], colWidths=[sig_col_w])
-    principal_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
-    date_tbl = PdfTable([[Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", getSampleStyleSheet()["Normal"])]], colWidths=[sig_col_w])
-    date_tbl.setStyle(TableStyle([("ALIGN", (0,0), (-1,-1), "CENTER")]))
+    line_tbl = PdfTable([[CenterLine(width=220, thickness=0.9)]], colWidths=[sig_col_w],
+                        style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
+    principal_tbl = PdfTable([[Paragraph(f"Principal - {PRINCIPAL}", getSampleStyleSheet()["Normal"])]],
+                             colWidths=[sig_col_w],
+                             style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
+    date_tbl = PdfTable([[Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", getSampleStyleSheet()["Normal"])]],
+                        colWidths=[sig_col_w],
+                        style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
 
     sig_stack = [img_row, [Spacer(1, 3)], [line_tbl], [Spacer(1, 4)], [principal_tbl], [date_tbl]]
     sig = PdfTable(sig_stack, colWidths=[sig_col_w])
-    sig.setStyle(TableStyle([
-        ("LEFTPADDING",  (0,0), (-1,-1), 0),
-        ("RIGHTPADDING", (0,0), (-1,-1), 0),
-        ("TOPPADDING",   (0,0), (-1,-1), 0),
-        ("BOTTOMPADDING",(0,0), (-1,-1), 0),
-    ]))
-
-    sig_row = PdfTable([["", sig]], colWidths=[W*0.62, sig_col_w])
-    sig_row.setStyle(TableStyle([("VALIGN", (0,0), (-1,-1), "BOTTOM")]))
+    sig_row = PdfTable([["", sig]], colWidths=[W*0.62, sig_col_w],
+                       style=TableStyle([("VALIGN",(0,0),(-1,-1),"BOTTOM")]))
     story.append(sig_row)
 
     doc.build(story, onFirstPage=draw_page_border, onLaterPages=draw_page_border)
@@ -372,35 +348,42 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
 # ========= main =========
 def main():
-    # Build list of record IDs
+    # Which record IDs?
     ids: List[str] = []
     if RECORD_IDS_ENV:
         ids.extend([x.strip() for x in RECORD_IDS_ENV.split(",") if x.strip()])
     elif RECORD_ID_SINGLE:
         ids.append(RECORD_ID_SINGLE.strip())
 
-    pathlib.Path("output").mkdir(parents=True, exist_ok=True)
-
+    # resolve distinct student names from provided IDs
+    name_to_first_fields: Dict[str, Dict[str, Any]] = {}
     for rid in ids:
         try:
-            table_obj, rec = get_table_and_record(rid)
-            if not rec or "fields" not in rec:
-                print(f"[WARN] Empty fields for {rid}; skipping.")
+            _, rec = get_rec_and_table(rid)
+            fields = rec.get("fields", {})
+            raw = fields.get(F["student_name"])
+            name = raw[0] if isinstance(raw, list) and raw else str(raw or "")
+            if not name:
+                print(f"[WARN] '{F['student_name']}' empty for {rid}; skipping.")
                 continue
-            fields = rec["fields"]
-
-            raw_name = fields.get(F["student_name"])
-            student_name = raw_name[0] if isinstance(raw_name, list) and raw_name else str(raw_name or "")
-            if not student_name:
-                print(f"[WARN] Field '{F['student_name']}' empty for {rid}; skipping.")
-                continue
-
-            group = fetch_group(student_name, table_obj) or [rec]
-            build_pdf(fields, group)
+            # keep the first fields seen for that name to render header (ID/year, etc.)
+            if name not in name_to_first_fields:
+                name_to_first_fields[name] = fields
         except SystemExit as e:
             print(str(e))
         except Exception as e:
-            print(f"[ERROR] Failed for {rid}: {e}")
+            print(f"[ERROR] Resolving {rid}: {e}")
+
+    if not name_to_first_fields:
+        sys.exit("[ERROR] No usable records resolved from the provided IDs.")
+
+    # for each distinct student name, gather rows across ALL tables and create ONE transcript
+    for student_name, header_fields in name_to_first_fields.items():
+        rows = fetch_rows_for_name_across_all_tables(student_name)
+        if not rows:
+            print(f"[WARN] No rows found across tables for {student_name}; using header record only.")
+            rows = [{"fields": header_fields}]
+        build_pdf(header_fields, rows)
 
 if __name__ == "__main__":
     main()
