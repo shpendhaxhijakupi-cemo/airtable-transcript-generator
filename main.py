@@ -41,10 +41,8 @@ SIGNATURE_PATH = os.environ.get("SIGNATURE_PATH", "signature_principal.png")
 PRINCIPAL      = os.environ.get("PRINCIPAL_NAME", "Ursula Derios")
 SIGN_DATEFMT   = os.environ.get("SIGN_DATE_FMT", "%B %d, %Y")
 
-# ========= LOG TABLE (literal table name is "TRANSCRIPT_LOG_TABLE") =========
+# ========= LOG TABLE =========
 TRANSCRIPT_LOG_TABLE = os.environ.get("TRANSCRIPT_LOG_TABLE", "TRANSCRIPT_LOG_TABLE")
-
-# Mappable log fields (set to "" to skip)
 LOG_FIELD_STUDENT_NAME      = os.environ.get("LOG_FIELD_STUDENT_NAME",      "Student Name")
 LOG_FIELD_STUDENT_ID        = os.environ.get("LOG_FIELD_STUDENT_ID",        "Student Canvas ID")
 LOG_FIELD_SCHOOL_YEAR       = os.environ.get("LOG_FIELD_SCHOOL_YEAR",       "School Year")
@@ -61,19 +59,18 @@ F = {
     "grade_select": "Grade Select",
     "school_year": "School Year",
 
-    # course details
     "course_name": "Course Name",
-    "course_code": "Course Code",              # -> Course Number
-    "assigned_teachers": "Assigned Teachers",  # -> Teacher (first)
-    "letter": "Grade Letter",                  # -> S1/S2
+    "course_code": "Course Code",
+    "assigned_teachers": "Assigned Teachers",
+    "letter": "Grade Letter",
 
     # rollups (fallbacks)
     "course_name_rollup": "Course Name Rollup (from Southlands Courses Enrollment 3)",
     "course_code_rollup": "Course Code Rollup (from Southlands Courses Enrollment 3)",
-}
 
-# The Grade % field names we should look for (first one that exists wins)
-CURRENT_SCORE_FIELD_CANDIDATES = ["# Current Score", "Current Score", "current score"]
+    # NEW: for Grade %
+    "current_score": "# Current Score",
+}
 
 # ========= THEME =========
 GRAY_HEADER = colors.HexColor("#F1F3F5")
@@ -147,35 +144,24 @@ def fetch_rows_for_name_across_all_tables(student_name: str) -> List[Dict[str, A
             print(f"[WARN] Could not query '{tname}': {e}")
     return merged
 
-def detect_semester(name: str, code: str) -> Tuple[bool, bool]:
-    t = f"{name} {code}".lower()
-    is_a = ("-a" in t) or (" a " in t) or t.endswith(" a")
-    is_b = ("-b" in t) or (" b " in t) or t.endswith(" b")
-    return (is_a and not is_b, is_b and not is_a)
-
-def looks_honors_ap(name: str, code: str) -> bool:
-    t = f"{name} {code}".lower()
-    HONOR_WORDS = ["honors", "honours", "ap ", " ap", "advanced placement", "pre-ap", "ib "]
-    return any(w in t for w in HONOR_WORDS)
-
-def transferred_credits(letter: str, is_honors: bool) -> str:
-    """
-    Convert letter to quality points; honors/AP adds +1 unless F.
-    We display as number, not fixed-decimal, for tidy layout.
-    """
-    base = {
-        "A":4.0, "A-":3.7, "B+":3.5, "B":3.0, "B-":2.7,
-        "C+":2.5, "C":2.0, "C-":1.7, "D+":1.5, "D":1.0, "D-":0.7, "F":0.0
+def quality_points(letter: str, honors: bool) -> float:
+    base_map = {
+        "A": 4.0, "A-": 3.7,
+        "B+": 3.5, "B": 3.0, "B-": 2.7,
+        "C+": 2.5, "C": 2.0, "C-": 1.7,
+        "D+": 1.5, "D": 1.0, "D-": 0.7,
+        "F": 0.0
     }
-    lt = (letter or "").strip().upper()
-    val = base.get(lt, "")
-    if val == "":
+    val = base_map.get((letter or "").upper(), "")
+    if val == "":  # unknown letter
         return ""
-    if lt != "F" and is_honors:
+    if honors:
         val += 1.0
-    # trim trailing zeros
-    s = f"{val:.1f}".rstrip("0").rstrip(".")
-    return s
+    return round(val, 2)
+
+def looks_honors(course_name: str) -> bool:
+    t = (course_name or "").lower()
+    return ("honors" in t) or ("ap" in t)
 
 class CenterLine(Flowable):
     def __init__(self, width=220, thickness=0.9):
@@ -227,66 +213,51 @@ def safe_filename(raw: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
     return s.strip("_") or "file"
 
-# --------- Current Score (Grade %) extraction ----------
-def get_current_scores(fields: Dict[str, Any]) -> List[str]:
-    for candidate in CURRENT_SCORE_FIELD_CANDIDATES:
-        if candidate in fields:
-            return listify(fields.get(candidate))
-    return []
-
-# ---- build rows for a single record (strict pairing, no blanks) ----
+# ---- build rows for a single record (strict pairing; single grade column) ----
 def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
     names    = listify(fields.get(F["course_name"])) or listify(fields.get(F["course_name_rollup"]))
     codes    = listify(fields.get(F["course_code"])) or listify(fields.get(F["course_code_rollup"]))
     teachers = listify(fields.get(F["assigned_teachers"]))
-    letters  = listify(fields.get(F["letter"])) or [sget(fields, F["letter"])]
-
-    # Per-row Grade % from Current Score
-    pcts     = get_current_scores(fields)
+    letter   = sget(fields, F["letter"]).strip()
+    percent  = sget(fields, F["current_score"]).strip()  # Grade % from # Current Score
 
     if not names and not codes:
         return []
 
-    n = max(1, len(names), len(codes), len(teachers), len(letters), len(pcts))
+    if not names:
+        names = [""] * len(codes)
+    if not codes:
+        codes = [""] * len(names)
 
-    def pad(seq, fill=""):
-        seq = list(seq) if isinstance(seq, list) else ([seq] if seq not in (None, "") else [])
-        if not seq: seq = [fill]
-        if len(seq) < n: seq += [seq[-1] if seq[-1] != "" else fill] * (n - len(seq))
-        return seq[:n]
+    if len(names) != len(codes):
+        if len(names) == 1 and len(codes) > 1:
+            names = [names[0]] * len(codes)
+        elif len(codes) == 1 and len(names) > 1:
+            codes = [codes[0]] * len(names)
+        else:
+            m = min(len(names), len(codes))
+            names, codes = names[:m], codes[:m]
 
-    names    = pad(names, "")
-    codes    = pad(codes, "")
-    teachers = pad(teachers, "")
-    letters  = pad(letters, "")
-    pcts     = pad(pcts, "")
-
+    first_teacher = teachers[0].split(",")[0].strip() if teachers else ""
     rows: List[List[str]] = []
-    for nm, cd, tchr, lt, pc in zip(names, codes, teachers, letters, pcts):
-        nm, cd = nm.strip(), cd.strip()
+
+    for i in range(len(names)):
+        nm = names[i].strip()
+        cd = codes[i].strip()
+        tchr = (teachers[i] if i < len(teachers) else first_teacher)
         tchr = tchr.split(",")[0].strip()
+
         if not (nm or cd):
             continue
 
-        a, b = detect_semester(nm, cd)
-        s1 = (lt or "—") if (a or not (a or b)) else ""
-        s2 = (lt or "—") if b else ""
+        honors = looks_honors(nm)
+        credits = quality_points(letter, honors)
 
-        # grade % tidy
-        pct_display = ""
-        if pc not in ("", None):
-            try:
-                val = float(str(pc).replace("%", "").strip())
-                pct_display = f"{val:.2f}".rstrip("0").rstrip(".")
-            except Exception:
-                pct_display = str(pc)
-
-        credits = transferred_credits(lt, looks_honors_ap(nm, cd))
-        rows.append([nm, cd, tchr, s1, s2, pct_display, credits])
+        # One grade column (letter), keep % and credits
+        rows.append([nm, cd, tchr, letter or "—", percent, credits if credits != "" else ""])
 
     return rows
 
-# ---- summarize courses for logging ----
 def summarize_courses(rows: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for r in rows:
@@ -298,43 +269,50 @@ def summarize_courses(rows: List[Dict[str, Any]]) -> str:
             lines.append(f"{nm} — {cd}" if cd else nm)
     return "\n".join(lines) if lines else ""
 
-# ---- Attach PDF (pyairtable first, then Web API fallback) ----
 def attach_pdf_to_log_record(log_table, rec_id: str, field_name: str, pdf_path: str):
     if not field_name:
+        print("[INFO] LOG_FIELD_PDF_ATTACHMENT is empty → skipping file attach.")
         return
     if not os.path.isfile(pdf_path):
         print(f"[WARN] PDF not found at {pdf_path} → skipping attachment.")
         return
+
     filename = os.path.basename(pdf_path)
+
     try:
         with open(pdf_path, "rb") as fh:
             content = fh.read()
         log_table.upload_attachment(
-            rec_id, field=field_name, filename=filename,
-            content=content, content_type="application/pdf"
+            rec_id,
+            field=field_name,
+            filename=filename,
+            content=content,
+            content_type="application/pdf",
         )
         print(f"[OK] Attached PDF via pyairtable.upload_attachment → field '{field_name}'.")
         return
     except Exception as e:
         print(f"[WARN] pyairtable.upload_attachment failed ({e}). Trying Web API fallback…")
+
     try:
         with open(pdf_path, "rb") as fh:
             files = {"file": (filename, fh, "application/pdf")}
             r = requests.post(
                 f"https://api.airtable.com/v0/bases/{AIRTABLE_BASE_ID}/attachments",
                 headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"},
-                files=files, timeout=60,
+                files=files,
+                timeout=60,
             )
         r.raise_for_status()
         upload_id = r.json().get("id")
         if not upload_id:
             raise RuntimeError(f"No 'id' returned from upload-attachment endpoint. Response: {r.text}")
+
         log_table.update(rec_id, {field_name: [{"id": upload_id}]})
         print("[OK] Attached PDF via Web API upload-attachment + record update.")
     except Exception as e:
         print(f"[WARN] PDF attachment upload failed even with fallback: {e}")
 
-# ---- LOG ONE ROW ----
 def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     try:
         tlog = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_LOG_TABLE)
@@ -345,7 +323,7 @@ def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows:
     student_name = sget(header_fields, F["student_name"]).strip()
     student_id   = sget(header_fields, F["student_id"])
     grade        = sget(header_fields, F["grade_select"])
-    year         = derive_school_year(header_fields, rows)
+    year         = sget(header_fields, F["school_year"])
     run_at_iso   = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     courses_text = summarize_courses(rows)
     source_ids   = ",".join({ r.get("id","") for r in rows if r.get("id") })
@@ -371,25 +349,12 @@ def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows:
     except Exception as e:
         print(f"[WARN] Attach step failed: {e}")
 
-# ---- Derive school year when the field is a rec id ----
-YEAR_RE = re.compile(r"(20\d{2}\s*[-/]\s*20\d{2})")
-def derive_school_year(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
-    yr = sget(student_fields, F["school_year"]).strip()
-    if yr and not yr.lower().startswith("rec"):
-        return yr
-    for r in rows:
-        for txt in listify(r.get("fields", {}).get(F["course_name"])) or []:
-            m = YEAR_RE.search(str(txt))
-            if m:
-                return m.group(1).replace(" ", "")
-    return yr or ""
-
 # ========= PDF =========
 def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     student_name = sget(student_fields, F["student_name"]).strip()
     student_id   = sget(student_fields, F["student_id"])
     grade        = sget(student_fields, F["grade_select"])
-    year         = derive_school_year(student_fields, rows)
+    year         = sget(student_fields, F["school_year"])
 
     out = pathlib.Path("output"); out.mkdir(parents=True, exist_ok=True)
     pdf_path = out / f"transcript_{safe_filename(student_name)}_{safe_filename(year)}.pdf"
@@ -454,31 +419,39 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
     if pathlib.Path(LOGO_PATH).exists():
         logo = fit_image(LOGO_PATH, max_w=W*LOGO_MAX_W_PCT, max_h=LOGO_MAX_H_PT)
-        story.append(PdfTable([[logo]], colWidths=[W], style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))))
+        story.append(
+            PdfTable(
+                [[logo]],
+                colWidths=[W],
+                style=TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER")])
+            )
+        )
         story.append(Spacer(1, LOGO_BOTTOM_SPACE))
 
     story.append(Paragraph("Report Card", styles["rc_h1"]))
     story.append(Paragraph(f"For School Year {year}", styles["rc_h2"]))
     story.append(Spacer(1, 8))
 
-    # Courses
-    table_data = [["Course Name", "Course #", "Teacher", "S1", "S2", "Grade %", "Credits"]]
+    # Courses (with one grade column + % + credits)
+    table_data = [["Course Name", "Course Number", "Teacher", "Grade (Letter)", "Grade %", "Transferred Credits"]]
     expanded: List[List[str]] = []
     for r in rows:
         expanded.extend(build_course_rows(r.get("fields", {})))
 
-    seen: Set[Tuple[str, str, str, str, str, str, str]] = set()
+    seen: Set[Tuple[str, str, str, str, str, str]] = set()
     clean: List[List[str]] = []
     for row in expanded:
         t = tuple(row)
-        if t not in seen and any(x.strip() for x in row):
+        if t not in seen and any(str(x).strip() for x in row):
             seen.add(t); clean.append(row)
     clean.sort(key=lambda x: (x[0].lower(), x[1].lower()))
     if not clean:
-        clean = [["(no courses found)", "", "", "", "", "", ""]]
+        clean = [["(no courses found)", "", "", "", "", ""]]
     table_data.extend(clean)
 
-    cw = [0.40*W, 0.16*W, 0.20*W, 0.06*W, 0.06*W, 0.06*W, 0.06*W]
+    # column widths
+    cw = [0.38*W, 0.16*W, 0.20*W, 0.12*W, 0.07*W, 0.07*W]
+
     courses = PdfTable(table_data, colWidths=cw, repeatRows=1)
     courses.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), ACCENT),
@@ -487,7 +460,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         ("FONTSIZE", (0,0), (-1,0), 10.5),
         ("FONTSIZE", (0,1), (-1,-1), 10),
         ("ALIGN", (0,0), (-1,0), "CENTER"),
-        ("ALIGN", (3,1), (6,-1), "CENTER"),
+        ("ALIGN", (3,1), (-1,-1), "CENTER"),
         ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
         ("GRID", (0,0), (-1,-1), 0.6, BORDER_GRAY),
         ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, ROW_ALT]),
@@ -552,7 +525,11 @@ def main():
             if name not in name_to_header:
                 name_to_header[name] = fields
 
-            rows = fetch_rows_for_name_across_all_tables(name) if INCLUDE_MATCH_BY_NAME else [rec]
+            if INCLUDE_MATCH_BY_NAME:
+                rows = fetch_rows_for_name_across_all_tables(name)
+            else:
+                rows = [rec]
+
             name_to_rows.setdefault(name, []).extend(rows)
 
         except SystemExit as e:
@@ -561,7 +538,7 @@ def main():
             print(f"[ERROR] Resolving {rid}: {e}")
 
     if not name_to_header:
-        sys.exit("[ERROR] No usable records resolved from the provided IDs.]")
+        sys.exit("[ERROR] No usable records resolved from the provided IDs.")
 
     for student_name, header_fields in name_to_header.items():
         rows = name_to_rows.get(student_name, [])
