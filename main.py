@@ -2,7 +2,7 @@ import os, sys, pathlib, re
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Set
 
-import requests  # for attachment fallback
+import requests
 from pyairtable import Api
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
@@ -41,16 +41,21 @@ SIGNATURE_PATH = os.environ.get("SIGNATURE_PATH", "signature_principal.png")
 PRINCIPAL      = os.environ.get("PRINCIPAL_NAME", "Ursula Derios")
 SIGN_DATEFMT   = os.environ.get("SIGN_DATE_FMT", "%B %d, %Y")
 
+# OPTIONAL: override the 6 column widths (fractions of page width), e.g.
+# TABLE_COL_WIDTHS="0.38,0.19,0.19,0.08,0.08,0.08"
+TABLE_COL_WIDTHS = os.environ.get("TABLE_COL_WIDTHS", "").strip()
+
 # ========= LOG TABLE =========
 TRANSCRIPT_LOG_TABLE = os.environ.get("TRANSCRIPT_LOG_TABLE", "TRANSCRIPT_LOG_TABLE")
-LOG_FIELD_STUDENT_NAME      = os.environ.get("LOG_FIELD_STUDENT_NAME",      "Student Name")
-LOG_FIELD_STUDENT_ID        = os.environ.get("LOG_FIELD_STUDENT_ID",        "Student Canvas ID")
-LOG_FIELD_SCHOOL_YEAR       = os.environ.get("LOG_FIELD_SCHOOL_YEAR",       "School Year")
-LOG_FIELD_GRADE_LEVEL       = os.environ.get("LOG_FIELD_GRADE_LEVEL",       "Grade Level")
-LOG_FIELD_RUN_AT            = os.environ.get("LOG_FIELD_RUN_AT",            "Transcript Run At (ISO)")
-LOG_FIELD_COURSES_TEXT      = os.environ.get("LOG_FIELD_COURSES_TEXT",      "Course List (text)")
-LOG_FIELD_SOURCE_IDS        = os.environ.get("LOG_FIELD_SOURCE_IDS",        "Source Record IDs (csv)")
-LOG_FIELD_PDF_ATTACHMENT    = os.environ.get("LOG_FIELD_PDF_ATTACHMENT",    "Transcript PDF")  # Attachment field
+
+LOG_FIELD_STUDENT_NAME   = os.environ.get("LOG_FIELD_STUDENT_NAME",   "Student Name")
+LOG_FIELD_STUDENT_ID     = os.environ.get("LOG_FIELD_STUDENT_ID",     "Student Canvas ID")
+LOG_FIELD_SCHOOL_YEAR    = os.environ.get("LOG_FIELD_SCHOOL_YEAR",    "School Year")
+LOG_FIELD_GRADE_LEVEL    = os.environ.get("LOG_FIELD_GRADE_LEVEL",    "Grade Level")
+LOG_FIELD_RUN_AT         = os.environ.get("LOG_FIELD_RUN_AT",         "Transcript Run At (ISO)")
+LOG_FIELD_COURSES_TEXT   = os.environ.get("LOG_FIELD_COURSES_TEXT",   "Course List (text)")
+LOG_FIELD_SOURCE_IDS     = os.environ.get("LOG_FIELD_SOURCE_IDS",     "Source Record IDs (csv)")
+LOG_FIELD_PDF_ATTACHMENT = os.environ.get("LOG_FIELD_PDF_ATTACHMENT", "Transcript PDF")
 
 # ========= AIRTABLE FIELDS =========
 F = {
@@ -59,13 +64,12 @@ F = {
     "grade_select": "Grade Select",
     "school_year": "School Year",
 
-    # course details
     "course_name": "Course Name",
     "course_code": "Course Code",              # -> Course Number
-    "assigned_teachers": "Assigned Teachers",  # -> Teacher (first)
+    "assigned_teachers": "Assigned Teachers",  # -> Teacher
     "letter": "Grade Letter",                  # -> Grade (Letter)
 
-    # numeric score for Grade %
+    # Grade % source (can be number OR long text)
     "current_score": "# Current Score",
 
     # rollups (fallbacks)
@@ -145,25 +149,6 @@ def fetch_rows_for_name_across_all_tables(student_name: str) -> List[Dict[str, A
             print(f"[WARN] Could not query '{tname}': {e}")
     return merged
 
-def looks_honors(name: str) -> bool:
-    t = (name or "").lower()
-    return ("honors" in t) or ("ap " in t) or ("ap®" in t) or ("ap " in t) or (" ap" in t)
-
-QP_BASE = {
-    "A": 4.0, "A-": 3.7,
-    "B+": 3.5, "B": 3.0, "B-": 2.7,
-    "C+": 2.5, "C": 2.0, "C-": 1.7,
-    "D+": 1.5, "D": 1.0, "D-": 0.7,
-    "F": 0.0
-}
-
-def quality_points(letter: str, honors: bool) -> str:
-    l = (letter or "").strip().upper()
-    if l in QP_BASE:
-        qp = QP_BASE[l] + (1.0 if honors and l != "F" else 0.0)
-        return f"{qp:.1f}".rstrip("0").rstrip(".")
-    return ""
-
 class CenterLine(Flowable):
     def __init__(self, width=220, thickness=0.9):
         super().__init__()
@@ -214,45 +199,59 @@ def safe_filename(raw: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
     return s.strip("_") or "file"
 
-# ---- numeric helpers for Grade % ----
-def _coerce_number(v):
+# ---------- numeric parsing for Grade % ----------
+def _coerce_number(val) -> float | None:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return float(val)
+    if isinstance(val, list) and val:
+        return _coerce_number(val[0])
+    s = str(val).strip()
+    if not s:
+        return None
+    if "%" in s:
+        m = re.search(r"([-+]?\d+(?:\.\d+)?)\s*%", s)
+        if m:
+            try:
+                return float(m.group(1))
+            except Exception:
+                pass
+    m = re.search(r"([-+]?\d+(?:\.\d+)?)", s.replace(",", ""))
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except Exception:
+        return None
+
+def _fmt_percent(raw) -> str:
+    v = _coerce_number(raw)
     if v is None:
         return ""
-    if isinstance(v, (int, float)):
-        return float(v)
-    s = str(v).strip()
-    if s == "":
-        return ""
-    try:
-        return float(s)
-    except Exception:
-        return ""
+    if 0 <= v <= 1:
+        v *= 100.0
+    v = max(0.0, min(100.0, v))
+    return f"{v:.1f}".rstrip("0").rstrip(".")
 
-def _fmt_percent(v):
-    n = _coerce_number(v)
-    if n == "":
-        return ""
-    if 0 <= n <= 1:
-        n *= 100.0
-    txt = f"{n:.2f}".rstrip("0").rstrip(".")
-    return txt
-
-# ---- build rows for a single record (strict pairing, single letter grade col) ----
+# ---------- build rows (6 columns) ----------
 def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
+    """
+    Returns rows as:
+    [Course Name, Course Number, Teacher, Grade (Letter), Grade %, Transferred Credits]
+    """
     names    = listify(fields.get(F["course_name"])) or listify(fields.get(F["course_name_rollup"]))
     codes    = listify(fields.get(F["course_code"])) or listify(fields.get(F["course_code_rollup"]))
     teachers = listify(fields.get(F["assigned_teachers"]))
     letter   = sget(fields, F["letter"]).strip()
-    percent  = _fmt_percent(fields.get(F["current_score"]))
+    score    = fields.get(F["current_score"])
 
     if not names and not codes:
         return []
-
     if not names:
         names = [""] * len(codes)
     if not codes:
         codes = [""] * len(names)
-
     if len(names) != len(codes):
         if len(names) == 1 and len(codes) > 1:
             names = [names[0]] * len(codes)
@@ -263,28 +262,36 @@ def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
             names, codes = names[:m], codes[:m]
 
     first_teacher = teachers[0].split(",")[0].strip() if teachers else ""
-    rows: List[List[str]] = []
+    grade_pct = _fmt_percent(score)
 
+    qp_map = {
+        "A": 4.0, "A-": 3.7,
+        "B+": 3.5, "B": 3.0, "B-": 2.7,
+        "C+": 2.5, "C": 2.0, "C-": 1.7,
+        "D+": 1.5, "D": 1.0, "D-": 0.7,
+        "F": 0.0
+    }
+    base_qp = qp_map.get(letter.upper(), None) if letter else None
+
+    def _is_honors_ap(nm: str, cd: str) -> bool:
+        t = f"{nm} {cd}".lower()
+        return (" honors" in t) or t.startswith("honors ") or " ap " in t or t.startswith("ap ")
+
+    rows: List[List[str]] = []
     for i in range(len(names)):
         nm = names[i].strip()
         cd = codes[i].strip()
+        if not (nm or cd):
+            continue
         tchr = (teachers[i] if i < len(teachers) else first_teacher)
         tchr = tchr.split(",")[0].strip()
 
-        if not (nm or cd):
-            continue
+        tp = ""
+        if base_qp is not None:
+            qp = base_qp + (1.0 if _is_honors_ap(nm, cd) else 0.0)
+            tp = f"{qp:.1f}".rstrip("0").rstrip(".")
 
-        honors = looks_honors(nm)
-        credits = quality_points(letter, honors)
-
-        rows.append([
-            nm,                    # Course Name
-            cd,                    # Course Number
-            tchr,                  # Teacher
-            letter or "—",         # Grade (Letter)
-            percent,               # Grade %
-            credits if credits != "" else ""  # Transferred Credits
-        ])
+        rows.append([nm, cd, tchr, letter, grade_pct, tp])
 
     return rows
 
@@ -300,7 +307,7 @@ def summarize_courses(rows: List[Dict[str, Any]]) -> str:
             lines.append(f"{nm} — {cd}" if cd else nm)
     return "\n".join(lines) if lines else ""
 
-# ---- attachment helper ----
+# ---- Attach PDF to a log record ----
 def attach_pdf_to_log_record(log_table, rec_id: str, field_name: str, pdf_path: str):
     if not field_name:
         print("[INFO] LOG_FIELD_PDF_ATTACHMENT is empty → skipping file attach.")
@@ -345,7 +352,7 @@ def attach_pdf_to_log_record(log_table, rec_id: str, field_name: str, pdf_path: 
     except Exception as e:
         print(f"[WARN] PDF attachment upload failed even with fallback: {e}")
 
-# ---- log row ----
+# ---- LOG ONE ROW INTO YOUR TRANSCRIPT_LOG_TABLE ----
 def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     try:
         tlog = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_LOG_TABLE)
@@ -459,34 +466,45 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(Paragraph(f"For School Year {year}", styles["rc_h2"]))
     story.append(Spacer(1, 8))
 
-    # Courses (single letter column + percent + credits)
+    # ======= Courses table =======
     table_data = [["Course Name", "Course Number", "Teacher", "Grade (Letter)", "Grade %", "Transferred Credits"]]
+
     expanded: List[List[str]] = []
     for r in rows:
         expanded.extend(build_course_rows(r.get("fields", {})))
 
+    # de-dup / sort
     seen: Set[Tuple[str, str, str, str, str, str]] = set()
     clean: List[List[str]] = []
     for row in expanded:
         t = tuple(row)
-        if t not in seen and any(x.strip() for x in row if isinstance(x, str)):
+        if t not in seen and any(x.strip() for x in row):
             seen.add(t); clean.append(row)
     clean.sort(key=lambda x: (x[0].lower(), x[1].lower()))
     if not clean:
         clean = [["(no courses found)", "", "", "", "", ""]]
     table_data.extend(clean)
 
-    # Tighter layout so % and Credits fit nicely
-    cw = [0.34*W, 0.18*W, 0.18*W, 0.12*W, 0.09*W, 0.09*W]
+    # Column widths from env or default
+    if TABLE_COL_WIDTHS:
+        try:
+            parts = [float(p.strip()) for p in TABLE_COL_WIDTHS.split(",") if p.strip()]
+            assert len(parts) == 6
+            cw = [W * f for f in parts]
+        except Exception:
+            cw = [0.36*W, 0.19*W, 0.19*W, 0.09*W, 0.08*W, 0.09*W]
+    else:
+        cw = [0.36*W, 0.19*W, 0.19*W, 0.09*W, 0.08*W, 0.09*W]
+
     courses = PdfTable(table_data, colWidths=cw, repeatRows=1)
     courses.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), ACCENT),
         ("TEXTCOLOR", (0,0), (-1,0), colors.white),
         ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,0), 10.5),
-        ("FONTSIZE", (0,1), (-1,-1), 10),
+        ("FONTSIZE", (0,0), (-1,0), 10.0),
+        ("FONTSIZE", (0,1), (-1,-1), 9.5),
         ("ALIGN", (0,0), (-1,0), "CENTER"),
-        ("ALIGN", (3,1), (-1,-1), "CENTER"),
+        ("ALIGN", (3,1), (5,-1), "CENTER"),
         ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
         ("GRID", (0,0), (-1,-1), 0.6, BORDER_GRAY),
         ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, ROW_ALT]),
@@ -510,11 +528,10 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
     line_tbl = PdfTable([[CenterLine(width=220, thickness=0.9)]], colWidths=[sig_col_w],
                         style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
-    normal = getSampleStyleSheet()["Normal"]
-    principal_tbl = PdfTable([[Paragraph(f"Principal - {PRINCIPAL}", normal)]],
+    principal_tbl = PdfTable([[Paragraph(f"Principal - {PRINCIPAL}", getSampleStyleSheet()["Normal"])]],
                              colWidths=[sig_col_w],
                              style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
-    date_tbl = PdfTable([[Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", normal)]],
+    date_tbl = PdfTable([[Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", getSampleStyleSheet()["Normal"])]],
                         colWidths=[sig_col_w],
                         style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
 
