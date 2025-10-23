@@ -62,7 +62,7 @@ jobs:
           PRINCIPAL_NAME: "Ursula Derios"
           SIGN_DATE_FMT: "%B %d, %Y"
 
-          # ---- Optional logo & signature sizing tweaks (safe to leave as defaults) ----
+          # ---- Optional logo & signature sizing tweaks ----
           LOGO_MAX_W_PCT: "0.30"
           LOGO_MAX_H_PT: "72"
           LOGO_BOTTOM_SPACE: "15"
@@ -70,8 +70,12 @@ jobs:
           SIG_IMG_MAX_W: "160"
           SIG_IMG_MAX_H: "50"
 
+          # ---- Table column widths (fractions of page width; 6 numbers, space or comma separated) ----
+          # Order: Course Name, Course Number, Teacher, Grade (Letter), Grade %, Transferred Credits
+          TABLE_COL_WIDTHS: "0.28 0.18 0.18 0.12 0.08 0.13"
+
           # ---- LOG TABLE (write-back of summary + PDF attachment) ----
-          TRANSCRIPT_LOG_TABLE: "TRANSCRIPT_LOG_TABLE"    # Airtable table name
+          TRANSCRIPT_LOG_TABLE: "TRANSCRIPT_LOG_TABLE"
 
           # Column names in that table (set to "" if a column doesn't exist and should be skipped)
           LOG_FIELD_STUDENT_NAME: "Student Name"
@@ -81,7 +85,7 @@ jobs:
           LOG_FIELD_RUN_AT: "Transcript Run At (ISO)"
           LOG_FIELD_COURSES_TEXT: "Course List (text)"
           LOG_FIELD_SOURCE_IDS: "Source Record IDs (csv)"
-          LOG_FIELD_PDF_ATTACHMENT: "Transcript PDF"      # must be an Attachment field
+          LOG_FIELD_PDF_ATTACHMENT: "Transcript PDF"
         run: |
           python main.py
 
