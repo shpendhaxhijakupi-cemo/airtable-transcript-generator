@@ -2,7 +2,7 @@ import os, sys, pathlib, re
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Set
 
-import requests
+import requests  # for attachment fallback
 from pyairtable import Api
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
@@ -50,7 +50,7 @@ LOG_FIELD_GRADE_LEVEL       = os.environ.get("LOG_FIELD_GRADE_LEVEL",       "Gra
 LOG_FIELD_RUN_AT            = os.environ.get("LOG_FIELD_RUN_AT",            "Transcript Run At (ISO)")
 LOG_FIELD_COURSES_TEXT      = os.environ.get("LOG_FIELD_COURSES_TEXT",      "Course List (text)")
 LOG_FIELD_SOURCE_IDS        = os.environ.get("LOG_FIELD_SOURCE_IDS",        "Source Record IDs (csv)")
-LOG_FIELD_PDF_ATTACHMENT    = os.environ.get("LOG_FIELD_PDF_ATTACHMENT",    "Transcript PDF")
+LOG_FIELD_PDF_ATTACHMENT    = os.environ.get("LOG_FIELD_PDF_ATTACHMENT",    "Transcript PDF")  # Attachment field
 
 # ========= AIRTABLE FIELDS =========
 F = {
@@ -59,17 +59,18 @@ F = {
     "grade_select": "Grade Select",
     "school_year": "School Year",
 
+    # course details
     "course_name": "Course Name",
-    "course_code": "Course Code",
-    "assigned_teachers": "Assigned Teachers",
-    "letter": "Grade Letter",
+    "course_code": "Course Code",              # -> Course Number
+    "assigned_teachers": "Assigned Teachers",  # -> Teacher (first)
+    "letter": "Grade Letter",                  # -> Grade (Letter)
+
+    # numeric score for Grade %
+    "current_score": "# Current Score",
 
     # rollups (fallbacks)
     "course_name_rollup": "Course Name Rollup (from Southlands Courses Enrollment 3)",
     "course_code_rollup": "Course Code Rollup (from Southlands Courses Enrollment 3)",
-
-    # NEW: for Grade %
-    "current_score": "# Current Score",
 }
 
 # ========= THEME =========
@@ -144,24 +145,24 @@ def fetch_rows_for_name_across_all_tables(student_name: str) -> List[Dict[str, A
             print(f"[WARN] Could not query '{tname}': {e}")
     return merged
 
-def quality_points(letter: str, honors: bool) -> float:
-    base_map = {
-        "A": 4.0, "A-": 3.7,
-        "B+": 3.5, "B": 3.0, "B-": 2.7,
-        "C+": 2.5, "C": 2.0, "C-": 1.7,
-        "D+": 1.5, "D": 1.0, "D-": 0.7,
-        "F": 0.0
-    }
-    val = base_map.get((letter or "").upper(), "")
-    if val == "":  # unknown letter
-        return ""
-    if honors:
-        val += 1.0
-    return round(val, 2)
+def looks_honors(name: str) -> bool:
+    t = (name or "").lower()
+    return ("honors" in t) or ("ap " in t) or ("ap®" in t) or ("ap " in t) or (" ap" in t)
 
-def looks_honors(course_name: str) -> bool:
-    t = (course_name or "").lower()
-    return ("honors" in t) or ("ap" in t)
+QP_BASE = {
+    "A": 4.0, "A-": 3.7,
+    "B+": 3.5, "B": 3.0, "B-": 2.7,
+    "C+": 2.5, "C": 2.0, "C-": 1.7,
+    "D+": 1.5, "D": 1.0, "D-": 0.7,
+    "F": 0.0
+}
+
+def quality_points(letter: str, honors: bool) -> str:
+    l = (letter or "").strip().upper()
+    if l in QP_BASE:
+        qp = QP_BASE[l] + (1.0 if honors and l != "F" else 0.0)
+        return f"{qp:.1f}".rstrip("0").rstrip(".")
+    return ""
 
 class CenterLine(Flowable):
     def __init__(self, width=220, thickness=0.9):
@@ -213,13 +214,36 @@ def safe_filename(raw: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
     return s.strip("_") or "file"
 
-# ---- build rows for a single record (strict pairing; single grade column) ----
+# ---- numeric helpers for Grade % ----
+def _coerce_number(v):
+    if v is None:
+        return ""
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    if s == "":
+        return ""
+    try:
+        return float(s)
+    except Exception:
+        return ""
+
+def _fmt_percent(v):
+    n = _coerce_number(v)
+    if n == "":
+        return ""
+    if 0 <= n <= 1:
+        n *= 100.0
+    txt = f"{n:.2f}".rstrip("0").rstrip(".")
+    return txt
+
+# ---- build rows for a single record (strict pairing, single letter grade col) ----
 def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
     names    = listify(fields.get(F["course_name"])) or listify(fields.get(F["course_name_rollup"]))
     codes    = listify(fields.get(F["course_code"])) or listify(fields.get(F["course_code_rollup"]))
     teachers = listify(fields.get(F["assigned_teachers"]))
     letter   = sget(fields, F["letter"]).strip()
-    percent  = sget(fields, F["current_score"]).strip()  # Grade % from # Current Score
+    percent  = _fmt_percent(fields.get(F["current_score"]))
 
     if not names and not codes:
         return []
@@ -253,11 +277,18 @@ def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
         honors = looks_honors(nm)
         credits = quality_points(letter, honors)
 
-        # One grade column (letter), keep % and credits
-        rows.append([nm, cd, tchr, letter or "—", percent, credits if credits != "" else ""])
+        rows.append([
+            nm,                    # Course Name
+            cd,                    # Course Number
+            tchr,                  # Teacher
+            letter or "—",         # Grade (Letter)
+            percent,               # Grade %
+            credits if credits != "" else ""  # Transferred Credits
+        ])
 
     return rows
 
+# ---- summarize courses for logging ----
 def summarize_courses(rows: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for r in rows:
@@ -269,6 +300,7 @@ def summarize_courses(rows: List[Dict[str, Any]]) -> str:
             lines.append(f"{nm} — {cd}" if cd else nm)
     return "\n".join(lines) if lines else ""
 
+# ---- attachment helper ----
 def attach_pdf_to_log_record(log_table, rec_id: str, field_name: str, pdf_path: str):
     if not field_name:
         print("[INFO] LOG_FIELD_PDF_ATTACHMENT is empty → skipping file attach.")
@@ -313,6 +345,7 @@ def attach_pdf_to_log_record(log_table, rec_id: str, field_name: str, pdf_path: 
     except Exception as e:
         print(f"[WARN] PDF attachment upload failed even with fallback: {e}")
 
+# ---- log row ----
 def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     try:
         tlog = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_LOG_TABLE)
@@ -419,20 +452,14 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
     if pathlib.Path(LOGO_PATH).exists():
         logo = fit_image(LOGO_PATH, max_w=W*LOGO_MAX_W_PCT, max_h=LOGO_MAX_H_PT)
-        story.append(
-            PdfTable(
-                [[logo]],
-                colWidths=[W],
-                style=TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER")])
-            )
-        )
+        story.append(PdfTable([[logo]], colWidths=[W], style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")])))
         story.append(Spacer(1, LOGO_BOTTOM_SPACE))
 
     story.append(Paragraph("Report Card", styles["rc_h1"]))
     story.append(Paragraph(f"For School Year {year}", styles["rc_h2"]))
     story.append(Spacer(1, 8))
 
-    # Courses (with one grade column + % + credits)
+    # Courses (single letter column + percent + credits)
     table_data = [["Course Name", "Course Number", "Teacher", "Grade (Letter)", "Grade %", "Transferred Credits"]]
     expanded: List[List[str]] = []
     for r in rows:
@@ -442,16 +469,15 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     clean: List[List[str]] = []
     for row in expanded:
         t = tuple(row)
-        if t not in seen and any(str(x).strip() for x in row):
+        if t not in seen and any(x.strip() for x in row if isinstance(x, str)):
             seen.add(t); clean.append(row)
     clean.sort(key=lambda x: (x[0].lower(), x[1].lower()))
     if not clean:
         clean = [["(no courses found)", "", "", "", "", ""]]
     table_data.extend(clean)
 
-    # column widths
-    cw = [0.38*W, 0.16*W, 0.20*W, 0.12*W, 0.07*W, 0.07*W]
-
+    # Tighter layout so % and Credits fit nicely
+    cw = [0.34*W, 0.18*W, 0.18*W, 0.12*W, 0.09*W, 0.09*W]
     courses = PdfTable(table_data, colWidths=cw, repeatRows=1)
     courses.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), ACCENT),
@@ -484,10 +510,11 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
 
     line_tbl = PdfTable([[CenterLine(width=220, thickness=0.9)]], colWidths=[sig_col_w],
                         style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
-    principal_tbl = PdfTable([[Paragraph(f"Principal - {PRINCIPAL}", getSampleStyleSheet()["Normal"])]],
+    normal = getSampleStyleSheet()["Normal"]
+    principal_tbl = PdfTable([[Paragraph(f"Principal - {PRINCIPAL}", normal)]],
                              colWidths=[sig_col_w],
                              style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
-    date_tbl = PdfTable([[Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", getSampleStyleSheet()["Normal"])]],
+    date_tbl = PdfTable([[Paragraph(f"Date: {datetime.today().strftime(SIGN_DATEFMT)}", normal)]],
                         colWidths=[sig_col_w],
                         style=TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
 
