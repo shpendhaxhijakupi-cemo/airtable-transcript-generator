@@ -2,7 +2,7 @@ import os, sys, pathlib, re
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Set
 
-import requests  # NEW
+import requests
 from pyairtable import Api
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
@@ -17,15 +17,12 @@ from reportlab.lib.enums import TA_CENTER
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
 AIRTABLE_BASE_ID = os.environ["AIRTABLE_BASE_ID"]
 
-# Partner tables (comma-separated). Fallback to TRANSCRIPT_TABLE or "Students 1221".
 TRANSCRIPT_TABLES_ENV = os.environ.get("TRANSCRIPT_TABLES", "")
 TRANSCRIPT_TABLE_FALLBACK = os.environ.get("TRANSCRIPT_TABLE", "Students 1221")
 
-# Accept RECORD_IDS (comma) or single RECORD_ID (or argv[1])
 RECORD_IDS_ENV   = os.getenv("RECORD_IDS", "").strip()
 RECORD_ID_SINGLE = os.getenv("RECORD_ID") or (sys.argv[1] if len(sys.argv) > 1 else "")
 
-# 0 (default): only explicit record IDs. 1: merge rows by student name across all tables.
 INCLUDE_MATCH_BY_NAME = os.getenv("INCLUDE_MATCH_BY_NAME", "0").strip() == "1"
 
 if not RECORD_IDS_ENV and not RECORD_ID_SINGLE:
@@ -41,11 +38,9 @@ SIGNATURE_PATH = os.environ.get("SIGNATURE_PATH", "signature_principal.png")
 PRINCIPAL      = os.environ.get("PRINCIPAL_NAME", "Ursula Derios")
 SIGN_DATEFMT   = os.environ.get("SIGN_DATE_FMT", "%B %d, %Y")
 
-# ========= LOG TABLE (literal table name is "TRANSCRIPT_LOG_TABLE") =========
+# ========= LOG TABLE =========
 TRANSCRIPT_LOG_TABLE = os.environ.get("TRANSCRIPT_LOG_TABLE", "TRANSCRIPT_LOG_TABLE")
 
-# Map your log table column names (override in workflow env if they differ).
-# Set any to "" to skip writing that field.
 LOG_FIELD_STUDENT_NAME      = os.environ.get("LOG_FIELD_STUDENT_NAME",      "Student Name")
 LOG_FIELD_STUDENT_ID        = os.environ.get("LOG_FIELD_STUDENT_ID",        "Student Canvas ID")
 LOG_FIELD_SCHOOL_YEAR       = os.environ.get("LOG_FIELD_SCHOOL_YEAR",       "School Year")
@@ -53,7 +48,7 @@ LOG_FIELD_GRADE_LEVEL       = os.environ.get("LOG_FIELD_GRADE_LEVEL",       "Gra
 LOG_FIELD_RUN_AT            = os.environ.get("LOG_FIELD_RUN_AT",            "Transcript Run At (ISO)")
 LOG_FIELD_COURSES_TEXT      = os.environ.get("LOG_FIELD_COURSES_TEXT",      "Course List (text)")
 LOG_FIELD_SOURCE_IDS        = os.environ.get("LOG_FIELD_SOURCE_IDS",        "Source Record IDs (csv)")
-LOG_FIELD_PDF_ATTACHMENT    = os.environ.get("LOG_FIELD_PDF_ATTACHMENT",    "Transcript PDF")  # Attachment field
+LOG_FIELD_PDF_ATTACHMENT    = os.environ.get("LOG_FIELD_PDF_ATTACHMENT",    "Transcript PDF")
 
 # ========= AIRTABLE FIELDS =========
 F = {
@@ -67,6 +62,9 @@ F = {
     "course_code": "Course Code",              # -> Course Number
     "assigned_teachers": "Assigned Teachers",  # -> Teacher (first)
     "letter": "Grade Letter",                  # -> S1/S2
+
+    # NEW: current score (Grade %) field
+    "current_score": "# Current Score",
 
     # rollups (fallbacks)
     "course_name_rollup": "Course Name Rollup (from Southlands Courses Enrollment 3)",
@@ -151,6 +149,27 @@ def detect_semester(name: str, code: str) -> Tuple[bool, bool]:
     is_b = ("-b" in t) or (" b " in t) or t.endswith(" b")
     return (is_a and not is_b, is_b and not is_a)
 
+def looks_honors_ap(name: str, code: str) -> bool:
+    """Heuristic to mark Honors/AP courses."""
+    t = f"{name} {code}".lower()
+    return ("honors" in t) or re.search(r"\bap\b", t, flags=re.IGNORECASE) is not None
+
+# Quality point maps
+QP_STANDARD = {
+    "A":4.0, "A-":3.7, "B+":3.5, "B":3.0, "B-":2.7,
+    "C+":2.5, "C":2.0, "C-":1.7, "D+":1.5, "D":1.0, "D-":0.7, "F":0.0
+}
+
+def transferred_credits(letter: str, honors: bool) -> str:
+    """Return quality points as string (no trailing .0), with +1 for Honors/AP (except F stays 0)."""
+    lt = (letter or "").strip().upper()
+    base = QP_STANDARD.get(lt, 0.0)
+    if lt == "F":  # explicitly 0 even for honors
+        return "0"
+    qp = base + (1.0 if honors and base > 0 else 0.0)
+    # pretty format (e.g. 3 -> "3" ; 3.5 -> "3.5")
+    return str(int(qp)) if abs(qp - int(qp)) < 1e-9 else f"{qp:.1f}"
+
 class CenterLine(Flowable):
     def __init__(self, width=220, thickness=0.9):
         super().__init__()
@@ -201,12 +220,20 @@ def safe_filename(raw: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
     return s.strip("_") or "file"
 
-# ---- build rows for a single record (strict pairing, no blanks) ----
+# ---- build rows for a single record (STRICT pairing, now with % and credits) ----
 def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
     names = listify(fields.get(F["course_name"])) or listify(fields.get(F["course_name_rollup"]))
     codes = listify(fields.get(F["course_code"])) or listify(fields.get(F["course_code_rollup"]))
     teachers = listify(fields.get(F["assigned_teachers"]))
-    grade_v = sget(fields, F["letter"])
+    grade_letter = sget(fields, F["letter"])
+    # Grade % (one value applies to the row; if multiple, we show the first)
+    # Often # Current Score is a single number field or rollup; normalize to text.
+    raw_score = fields.get(F["current_score"])
+    grade_pct = ""
+    if isinstance(raw_score, list) and raw_score:
+        grade_pct = str(raw_score[0])
+    elif raw_score is not None:
+        grade_pct = str(raw_score)
 
     if not names and not codes:
         return []
@@ -233,18 +260,32 @@ def build_course_rows(fields: Dict[str, Any]) -> List[List[str]]:
         cd = codes[i].strip()
         tchr = (teachers[i] if i < len(teachers) else first_teacher)
         tchr = tchr.split(",")[0].strip()
-
         if not (nm or cd):
             continue
 
+        # S1/S2 map from single Grade Letter (same as before)
         a, b = detect_semester(nm, cd)
-        s1 = (grade_v or "—") if (a or not (a or b)) else ""
-        s2 = (grade_v or "—") if b else ""
-        rows.append([nm, cd, tchr, s1, s2])
+        s1 = (grade_letter or "—") if (a or not (a or b)) else ""
+        s2 = (grade_letter or "—") if b else ""
+
+        # Honors/AP detection for credits
+        is_hon = looks_honors_ap(nm, cd)
+        credits = transferred_credits(grade_letter, is_hon)
+
+        # % display: try to pretty format as number (keep string if non-numeric)
+        pct_display = grade_pct
+        try:
+            if grade_pct not in ("", None):
+                val = float(str(grade_pct).replace("%", "").strip())
+                pct_display = f"{val:.2f}"
+        except Exception:
+            pass
+
+        # row shape now: [Course Name, Course Number, Teacher, S1, S2, Grade %, Transferred Credits]
+        rows.append([nm, cd, tchr, s1, s2, pct_display, credits])
 
     return rows
 
-# ---- summarize courses for logging ----
 def summarize_courses(rows: List[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for r in rows:
@@ -256,14 +297,7 @@ def summarize_courses(rows: List[Dict[str, Any]]) -> str:
             lines.append(f"{nm} — {cd}" if cd else nm)
     return "\n".join(lines) if lines else ""
 
-# ---- NEW: Attach PDF to a log record (pyairtable first, then Web API fallback) ----
 def attach_pdf_to_log_record(log_table, rec_id: str, field_name: str, pdf_path: str):
-    """
-    Attach a local PDF to an Airtable Attachment field.
-    Strategy:
-      1) pyairtable.upload_attachment()
-      2) Web API /v0/bases/{BASE_ID}/attachments → update record with {"field":[{"id": upload_id}]}
-    """
     if not field_name:
         print("[INFO] LOG_FIELD_PDF_ATTACHMENT is empty → skipping file attach.")
         return
@@ -273,7 +307,6 @@ def attach_pdf_to_log_record(log_table, rec_id: str, field_name: str, pdf_path: 
 
     filename = os.path.basename(pdf_path)
 
-    # 1) Try pyairtable helper
     try:
         with open(pdf_path, "rb") as fh:
             content = fh.read()
@@ -289,7 +322,6 @@ def attach_pdf_to_log_record(log_table, rec_id: str, field_name: str, pdf_path: 
     except Exception as e:
         print(f"[WARN] pyairtable.upload_attachment failed ({e}). Trying Web API fallback…")
 
-    # 2) Web API fallback (Upload Attachment → link by id)
     try:
         with open(pdf_path, "rb") as fh:
             files = {"file": (filename, fh, "application/pdf")}
@@ -309,7 +341,6 @@ def attach_pdf_to_log_record(log_table, rec_id: str, field_name: str, pdf_path: 
     except Exception as e:
         print(f"[WARN] PDF attachment upload failed even with fallback: {e}")
 
-# ---- LOG ONE ROW INTO YOUR TRANSCRIPT_LOG_TABLE ----
 def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     try:
         tlog = api.table(AIRTABLE_BASE_ID, TRANSCRIPT_LOG_TABLE)
@@ -325,7 +356,6 @@ def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows:
     courses_text = summarize_courses(rows)
     source_ids   = ",".join({ r.get("id","") for r in rows if r.get("id") })
 
-    # Build payload only using configured column names (skip empty ones)
     payload = {}
     if LOG_FIELD_STUDENT_NAME:   payload[LOG_FIELD_STUDENT_NAME]   = student_name
     if LOG_FIELD_STUDENT_ID:     payload[LOG_FIELD_STUDENT_ID]     = student_id
@@ -342,7 +372,6 @@ def log_to_airtable(pdf_path: pathlib.Path, header_fields: Dict[str, Any], rows:
         print(f"[WARN] Failed to create log record: {e}")
         return
 
-    # Try to attach the PDF file to the attachment field (if configured)
     try:
         attach_pdf_to_log_record(tlog, rec["id"], LOG_FIELD_PDF_ATTACHMENT, str(pdf_path))
     except Exception as e:
@@ -426,12 +455,13 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
     story.append(Spacer(1, 8))
 
     # Courses
-    table_data = [["Course Name", "Course Number", "Teacher", "S1", "S2"]]
+    # NEW headers include Grade % and Transferred Credits
+    table_data = [["Course Name", "Course Number", "Teacher", "S1", "S2", "Grade %", "Transferred Credits"]]
     expanded: List[List[str]] = []
     for r in rows:
         expanded.extend(build_course_rows(r.get("fields", {})))
 
-    seen: Set[Tuple[str, str, str, str, str]] = set()
+    seen: Set[Tuple[str, str, str, str, str, str, str]] = set()
     clean: List[List[str]] = []
     for row in expanded:
         t = tuple(row)
@@ -439,10 +469,10 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
             seen.add(t); clean.append(row)
     clean.sort(key=lambda x: (x[0].lower(), x[1].lower()))
     if not clean:
-        clean = [["(no courses found)", "", "", "", ""]]
+        clean = [["(no courses found)", "", "", "", "", "", ""]]
     table_data.extend(clean)
 
-    cw = [0.46*W, 0.18*W, 0.22*W, 0.07*W, 0.07*W]
+    cw = [0.37*W, 0.15*W, 0.18*W, 0.07*W, 0.07*W, 0.08*W, 0.08*W]
     courses = PdfTable(table_data, colWidths=cw, repeatRows=1)
     courses.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,0), ACCENT),
@@ -451,7 +481,7 @@ def build_pdf(student_fields: Dict[str, Any], rows: List[Dict[str, Any]]):
         ("FONTSIZE", (0,0), (-1,0), 10.5),
         ("FONTSIZE", (0,1), (-1,-1), 10),
         ("ALIGN", (0,0), (-1,0), "CENTER"),
-        ("ALIGN", (3,1), (4,-1), "CENTER"),
+        ("ALIGN", (3,1), (-1,-1), "CENTER"),
         ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
         ("GRID", (0,0), (-1,-1), 0.6, BORDER_GRAY),
         ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, ROW_ALT]),
@@ -529,7 +559,7 @@ def main():
             print(f"[ERROR] Resolving {rid}: {e}")
 
     if not name_to_header:
-        sys.exit("[ERROR] No usable records resolved from the provided IDs.")
+        sys.exit("[ERROR] No usable records resolved from the provided IDs.]")
 
     for student_name, header_fields in name_to_header.items():
         rows = name_to_rows.get(student_name, [])
