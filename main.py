@@ -42,7 +42,7 @@ PRINCIPAL      = os.environ.get("PRINCIPAL_NAME", "Ursula Derios")
 SIGN_DATEFMT   = os.environ.get("SIGN_DATE_FMT", "%B %d, %Y")
 
 # OPTIONAL: override the 6 column widths (fractions of page width), e.g.
-# TABLE_COL_WIDTHS="0.25,0.19,0.19,0.08,0.08,0.15"
+# TABLE_COL_WIDTHS="0.10,0.19,0.19,0.08,0.08,0.15"
 TABLE_COL_WIDTHS = os.environ.get("TABLE_COL_WIDTHS", "").strip()
 
 # ========= LOG TABLE =========
